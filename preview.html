@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en" data-flavor="mocha">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Neattttty — preview v2 · Excalidraw-like + Catppuccin</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Caveat:wght@600&display=swap" rel="stylesheet">
+<style>
+  /* ---------- Catppuccin flavors ---------- */
+  html[data-flavor="mocha"]{--rosewater:#F5E0DC;--flamingo:#F2CDCD;--pink:#F5C2E7;--mauve:#CBA6F7;--red:#F38BA8;--maroon:#EBA0AC;--peach:#FAB387;--yellow:#F9E2AF;--green:#A6E3A1;--green-deep:#3A7D44;--teal:#94E2D5;--sky:#89DCEB;--sapphire:#74C7EC;--blue:#89B4FA;--lavender:#B4BEFE;--text:#CDD6F4;--subtext1:#BAC2DE;--subtext0:#A6ADC8;--overlay2:#9399B2;--overlay1:#7F849C;--overlay0:#6C7086;--surface2:#585B70;--surface1:#45475A;--surface0:#313244;--base:#1E1E2E;--mantle:#181825;--crust:#11111B;--canvas:#1E1E2E;--panel:#23232f;--panel-border:#3a3d55;--input:#181825;--shadow:0 12px 40px -12px rgba(0,0,0,.6)}
+  html[data-flavor="macchiato"]{--rosewater:#F4DBD6;--flamingo:#F0C6C6;--pink:#F5BDE6;--mauve:#C6A0F6;--red:#ED8796;--maroon:#EE99A0;--peach:#F5A97F;--yellow:#EED49F;--green:#A6DA95;--green-deep:#3A7D44;--teal:#8BD5CA;--sky:#91D7E3;--sapphire:#7DC4E4;--blue:#8AADF4;--lavender:#B7BDF8;--text:#CAD3F5;--subtext1:#B8C0E0;--subtext0:#A5ADCB;--overlay2:#939AB7;--overlay1:#8087A2;--overlay0:#6E738D;--surface2:#5B6078;--surface1:#494D64;--surface0:#363A4F;--base:#24273A;--mantle:#1E2030;--crust:#181926;--canvas:#24273A;--panel:#292c40;--panel-border:#454a68;--input:#1E2030;--shadow:0 12px 40px -12px rgba(0,0,0,.55)}
+  html[data-flavor="frappe"]{--rosewater:#F2D5CF;--flamingo:#EEBEBE;--pink:#F4B8E4;--mauve:#CA9EE6;--red:#E78284;--maroon:#EA999C;--peach:#EF9F76;--yellow:#E5C890;--green:#A6D189;--green-deep:#3A7D44;--teal:#81C8BE;--sky:#99D1DB;--sapphire:#85C1DC;--blue:#8CAAEE;--lavender:#BABBF1;--text:#C6D0F5;--subtext1:#B8C0E0;--subtext0:#A5ADCE;--overlay2:#949CBB;--overlay1:#838BA7;--overlay0:#737994;--surface2:#626880;--surface1:#51576D;--surface0:#414559;--base:#303446;--mantle:#292C3C;--crust:#232634;--canvas:#303446;--panel:#353a52;--panel-border:#565d82;--input:#292C3C;--shadow:0 12px 40px -12px rgba(0,0,0,.5)}
+  html[data-flavor="latte"]{--rosewater:#DC8A78;--flamingo:#DD7878;--pink:#EA76CB;--mauve:#8839EF;--red:#D20F39;--maroon:#E64553;--peach:#FE640B;--yellow:#DF8E1D;--green:#40A02B;--green-deep:#2A6B1D;--teal:#179299;--sky:#04A5E5;--sapphire:#209FB5;--blue:#1E66F5;--lavender:#7287FD;--text:#4C4F69;--subtext1:#5C5F77;--subtext0:#6C6F85;--overlay2:#7C7F93;--overlay1:#8C8FA1;--overlay0:#9CA0B0;--surface2:#ACB0BE;--surface1:#BCC0CC;--surface0:#CCD0DA;--base:#EFF1F5;--mantle:#E6E9EF;--crust:#DCE0E8;--canvas:#EFF1F5;--panel:#FFFFFF;--panel-border:#D3D7E3;--input:#EFF1F5;--shadow:0 12px 32px -12px rgba(76,79,105,.3)}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:Inter,system-ui,sans-serif;background:var(--crust);color:var(--text);min-height:100vh;padding:22px 16px 50px;transition:background .25s}
+  .wrap{max-width:1220px;margin:0 auto}
+  .top{display:flex;align-items:end;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:12px}
+  .top h1{margin:0;font-size:30px;letter-spacing:-.02em}
+  .top h1 .cat{font-family:"IBM Plex Mono",monospace;font-size:12px;vertical-align:middle;background:var(--green);color:#11111B;border-radius:999px;padding:3px 9px;margin-left:8px;font-weight:500}
+  .top p{margin:6px 0 0;color:var(--subtext0);font-size:13.5px;max-width:660px}
+  .flavors{display:flex;gap:8px;align-items:center;background:var(--panel);border:1px solid var(--panel-border);border-radius:999px;padding:5px 6px}
+  .flavors span{font:500 11.5px "IBM Plex Mono",monospace;color:var(--subtext0);padding:0 6px}
+  .flavors button{border:1px solid var(--panel-border);background:var(--surface0);color:var(--text);font:600 12px Inter;border-radius:999px;padding:7px 12px;cursor:pointer;display:flex;gap:7px;align-items:center}
+  .flavors button.on{background:var(--green);border-color:var(--green);color:#11111B}
+  .flavors i{width:10px;height:10px;border-radius:50%;display:block}
+  /* Excalidraw-like window */
+  .app{position:relative;border:1px solid var(--panel-border);border-radius:16px;overflow:hidden;background:var(--canvas);min-height:640px;box-shadow:var(--shadow)}
+  .ex-top{position:absolute;top:0;left:0;right:0;display:flex;align-items:flex-start;gap:10px;padding:12px;z-index:5;pointer-events:none}
+  .ex-top>*{pointer-events:auto}
+  .menu-cluster{display:flex;gap:8px;align-items:center}
+  .iconbtn{background:var(--panel);border:1px solid var(--panel-border);color:var(--text);border-radius:10px;min-width:38px;height:38px;display:flex;align-items:center;justify-content:center;font-size:17px;cursor:pointer}
+  .filepill{background:var(--panel);border:1px solid var(--panel-border);border-radius:10px;height:38px;display:flex;align-items:center;gap:9px;padding:0 12px;font-size:13px}
+  .filepill b{font-weight:600}.filepill small{color:var(--subtext0);font-family:"IBM Plex Mono",monospace;font-size:11px}
+  .saved{font-size:11px;color:var(--green);border:1px solid var(--green);border-radius:999px;padding:2px 8px;background:color-mix(in srgb, var(--green) 14%, transparent)}
+  /* floating toolbar like excalidraw.com */
+  .toolbar{margin:0 auto;background:var(--panel);border:1px solid var(--panel-border);border-radius:14px;display:flex;gap:2px;padding:5px;box-shadow:0 6px 20px -8px rgba(0,0,0,.4)}
+  .toolbar button{border:0;background:transparent;color:var(--text);width:37px;height:36px;border-radius:9px;font-size:16px;cursor:pointer;position:relative}
+  .toolbar button:hover{background:var(--surface0)}
+  .toolbar button.on{background:var(--green);color:#11111B}
+  .toolbar button .k{position:absolute;bottom:1px;right:4px;font:500 8.5px "IBM Plex Mono",monospace;opacity:.65}
+  .toolbar .sep{width:1px;background:var(--panel-border);margin:5px 3px}
+  .right-cluster{margin-left:auto;display:flex;gap:8px}
+  .btn{background:var(--panel);border:1px solid var(--panel-border);color:var(--text);border-radius:10px;padding:0 13px;height:38px;font:600 13px Inter;cursor:pointer}
+  .btn.primary{background:var(--green);border-color:var(--green);color:#11111B}
+  /* canvas */
+  .canvas{position:absolute;inset:0;background-image:radial-gradient(color-mix(in srgb, var(--text) 16%, transparent) 1px, transparent 1px);background-size:24px 24px}
+  .stroke{position:absolute;border:2.5px solid var(--text);background:color-mix(in srgb, var(--panel) 88%, transparent);box-shadow:3px 3px 0 color-mix(in srgb, var(--text) 85%, transparent)}
+  .r1{left:23%;top:22%;width:270px;height:120px;border-radius:255px 15px 225px 15px/15px 225px 15px 255px;padding:14px;transform:rotate(-.6deg)}
+  .r2{left:52%;top:20%;width:200px;height:104px;border-radius:15px 225px 15px 255px/225px 15px 255px 15px;padding:12px;border-color:var(--green)}
+  .r3{left:26%;top:52%;width:460px;height:130px;border-radius:14px 60px 16px 48px/48px 16px 60px 14px;padding:14px}
+  .stroke b{font-family:Caveat,cursive;font-size:23px;font-weight:600}
+  .stroke p{margin:2px 0 0;font-size:12px;color:var(--subtext1)}
+  .framebox{position:absolute;left:19%;top:15%;width:62%;height:72%;border:2px dashed var(--green);border-radius:12px;background:color-mix(in srgb, var(--green) 7%, transparent)}
+  .framebox label{position:absolute;top:-12px;left:12px;background:var(--green);color:#11111B;font:700 11px Inter;padding:3px 9px;border-radius:999px}
+  .conn{position:absolute;color:var(--green);font-family:Caveat,cursive;font-size:30px}
+  /* left properties panel — like Excalidraw's selected-shape panel */
+  .props{position:absolute;left:12px;top:70px;width:222px;background:var(--panel);border:1px solid var(--panel-border);border-radius:14px;padding:12px;z-index:4}
+  .props h4{margin:0 0 8px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--subtext0)}
+  .props .lbl{font-size:12px;color:var(--subtext1);margin:10px 0 6px}
+  .swatches{display:grid;grid-template-columns:repeat(5,1fr);gap:6px}
+  .sw{height:26px;border-radius:7px;border:2px solid transparent;cursor:default}
+  .sw.on{border-color:var(--green);outline:2px solid color-mix(in srgb, var(--green) 45%, transparent)}
+  .seg{display:flex;background:var(--surface0);border-radius:9px;padding:3px;gap:3px}
+  .seg span{flex:1;text-align:center;font-size:11.5px;font-weight:600;padding:6px 0;border-radius:7px;color:var(--subtext1)}
+  .seg span.on{background:var(--panel);color:var(--text);box-shadow:0 1px 4px rgba(0,0,0,.3)}
+  input[type=range]{width:100%;accent-color:var(--green)}
+  /* right dock: scenes + slides */
+  .dock{position:absolute;right:12px;top:70px;width:248px;background:var(--panel);border:1px solid var(--panel-border);border-radius:14px;z-index:4;overflow:hidden}
+  .tabs{display:flex;background:var(--surface0);margin:8px;border-radius:10px;padding:3px}
+  .tabs button{flex:1;border:0;background:transparent;color:var(--subtext1);font:600 12px Inter;padding:7px;border-radius:8px;cursor:pointer}
+  .tabs button.on{background:var(--panel);color:var(--text)}
+  .docklist{padding:0 10px 10px;display:flex;flex-direction:column;gap:7px;max-height:300px;overflow:hidden}
+  .srow{display:flex;gap:9px;align-items:center;border:1px solid var(--panel-border);border-radius:10px;padding:8px;background:var(--input)}
+  .srow.on{border-color:var(--green)}
+  .srow i{width:40px;height:30px;flex:none;border-radius:6px;background:linear-gradient(var(--surface1),var(--surface1)) padding-box, repeating-linear-gradient(0deg, transparent 0 5px, var(--overlay0) 5px 6px);border:1px solid var(--panel-border);opacity:.9}
+  .srow b{font-size:12.5px;display:block}.srow small{font-size:11px;color:var(--subtext0);font-family:"IBM Plex Mono",monospace}
+  .dockfoot{padding:10px;border-top:1px solid var(--panel-border);display:flex;gap:7px}
+  .dockfoot .btn{flex:1;height:34px;font-size:12px}
+  /* bottom-left excalidraw controls */
+  .zoomctl{position:absolute;left:12px;bottom:76px;display:flex;gap:8px;z-index:4}
+  .zoomctl .group{background:var(--panel);border:1px solid var(--panel-border);border-radius:11px;display:flex;overflow:hidden}
+  .zoomctl button{border:0;background:transparent;color:var(--text);width:36px;height:34px;font-size:15px;cursor:pointer}
+  .zoomctl button:hover{background:var(--surface0)}
+  /* AI dock bottom-center like command bar */
+  .ai{position:absolute;left:50%;transform:translateX(-50%);bottom:14px;width:min(620px,92%);background:var(--panel);border:1px solid var(--green);border-radius:14px;padding:8px;display:flex;gap:8px;align-items:center;z-index:5;box-shadow:0 8px 28px -10px color-mix(in srgb, var(--green) 55%, transparent)}
+  .model{background:var(--surface0);border:1px solid var(--panel-border);color:var(--text);border-radius:9px;font:500 12px "IBM Plex Mono",monospace;padding:9px 10px;display:flex;gap:7px;align-items:center;white-space:nowrap;cursor:pointer}
+  .pulse{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 0 4px color-mix(in srgb, var(--green) 25%, transparent)}
+  .ai input{flex:1;background:var(--input);border:1px solid var(--panel-border);color:var(--text);border-radius:9px;padding:10px 12px;font:400 13px Inter;outline:none}
+  .go{background:var(--green);border:0;color:#11111B;font:700 13px Inter;border-radius:9px;padding:10px 15px;cursor:pointer}
+  /* hamburger dropdown */
+  .menu{position:absolute;left:12px;top:58px;width:264px;background:var(--panel);border:1px solid var(--panel-border);border-radius:14px;z-index:6;padding:8px;display:none;box-shadow:var(--shadow)}
+  .menu.on{display:block}
+  .menu a{display:flex;justify-content:space-between;padding:9px 10px;border-radius:9px;font-size:13px;color:var(--text);text-decoration:none}
+  .menu a:hover{background:var(--surface0)}
+  .menu small{color:var(--subtext0);font-family:"IBM Plex Mono",monospace;font-size:11px}
+  /* dashboard overlay styled like Excalidraw dialog */
+  .overlay{position:absolute;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;z-index:7;padding:20px}
+  .overlay.on{display:flex}
+  .dialog{background:var(--panel);border:1px solid var(--panel-border);border-radius:16px;max-width:720px;width:100%;padding:18px;max-height:86%;overflow:auto}
+  .dialog h3{margin:0 0 4px}.dialog p{margin:0 0 12px;color:var(--subtext0);font-size:13px}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+  .card{border:1px solid var(--panel-border);background:var(--input);border-radius:12px;padding:10px}
+  .card.new{border-style:dashed;text-align:center;color:var(--subtext1)}
+  .card b{font-size:13px}.card small{color:var(--subtext0);font-family:"IBM Plex Mono",monospace;font-size:11px}
+  .foot{max-width:1220px;margin:12px auto 0;color:var(--subtext0);font-size:12.5px;background:var(--panel);border:1px solid var(--panel-border);border-radius:12px;padding:12px 14px}
+  code{font-family:"IBM Plex Mono",monospace;background:var(--surface0);padding:1px 6px;border-radius:6px}
+  @media(max-width:1000px){.props,.dock{display:none}.toolbar{flex-wrap:wrap;justify-content:center}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div>
+      <h1>Neattttty <span class="cat">CATPPUCCIN · GREEN</span></h1>
+      <p>Same shell as the free Excalidraw you know — floating toolbar, shape panel, zoom controls — re-skinned in Catppuccin + green accent. Mock only, confirm then I build the real thing in <code>./Neattttty</code>.</p>
+    </div>
+    <div class="flavors">
+      <span>flavor</span>
+      <button data-f="latte"><i style="background:#40A02B"></i>Latte</button>
+      <button data-f="frappe"><i style="background:#A6D189"></i>Frappé</button>
+      <button data-f="macchiato"><i style="background:#A6DA95"></i>Macchiato</button>
+      <button class="on" data-f="mocha"><i style="background:#A6E3A1"></i>Mocha</button>
+    </div>
+  </div>
+
+  <div class="app">
+    <div class="canvas"></div>
+    <div class="framebox"><label>Frame → Slide 2 / 3</label></div>
+    <div class="stroke r1"><b>User → AI → Board</b><p>prompt becomes movable boxes + mermaid</p></div>
+    <div class="stroke r2"><b>Ollama local</b><p>no internet needed</p></div>
+    <div class="stroke r3"><b>Properties on the left, scenes on the right</b><p>just like Excalidraw — stroke, fill, roughness, opacity</p></div>
+    <div class="conn" style="left:46%;top:37%">— — ⇢</div>
+    <div class="conn" style="left:33%;top:48%">⇣</div>
+
+    <div class="ex-top">
+      <div class="menu-cluster">
+        <div class="iconbtn" id="burger">☰</div>
+        <div class="filepill"><b>Neattttty</b><small>~/scenes/product-flow</small><span class="saved">● saved locally</span></div>
+      </div>
+      <div class="toolbar" id="tools">
+        <button title="Lock">🔒</button><div class="sep"></div>
+        <button class="on" title="Selection">➤<span class="k">1</span></button>
+        <button title="Hand">✋<span class="k">2</span></button>
+        <button title="Rectangle">▢<span class="k">3</span></button>
+        <button title="Diamond">◇<span class="k">4</span></button>
+        <button title="Ellipse">○<span class="k">5</span></button>
+        <button title="Arrow">↗<span class="k">6</span></button>
+        <button title="Line">―<span class="k">7</span></button>
+        <button title="Draw">✎<span class="k">8</span></button>
+        <button title="Text">T<span class="k">9</span></button>
+        <button title="Image">🖼</button>
+        <button title="Eraser">⌫</button>
+        <div class="sep"></div>
+        <button title="Frame">▦</button>
+        <button title="Laser">🔦</button>
+      </div>
+      <div class="right-cluster">
+        <button class="btn" id="libBtn">📚 Library</button>
+        <button class="btn" id="dashBtn">▦ Scenes</button>
+        <button class="btn primary">▶ Present</button>
+      </div>
+    </div>
+
+    <div class="menu" id="menu">
+      <a href="#" onclick="return false">Open scene <small>.excalidraw</small></a>
+      <a href="#" onclick="return false">Save to disk <small>Ctrl+S</small></a>
+      <a href="#" onclick="return false">Dashboard — all scenes <small>unlimited</small></a>
+      <a href="#" onclick="return false">Collections <small>Work · Study</small></a>
+      <a href="#" onclick="return false">Trash <small>30 days</small></a>
+      <a href="#" onclick="return false">Export PNG / SVG / PPTX <small>local</small></a>
+      <a href="#" onclick="return false">Help & shortcuts <small>?</small></a>
+    </div>
+
+    <div class="props">
+      <h4>Shape · selected</h4>
+      <div class="lbl">Stroke</div>
+      <div class="swatches">
+        <div class="sw on" style="background:#CDD6F4"></div><div class="sw" style="background:#A6E3A1"></div><div class="sw" style="background:#89B4FA"></div><div class="sw" style="background:#F9E2AF"></div><div class="sw" style="background:#F38BA8"></div>
+        <div class="sw" style="background:#94E2D5"></div><div class="sw" style="background:#CBA6F7"></div><div class="sw" style="background:#FAB387"></div><div class="sw" style="background:#585B70"></div><div class="sw" style="background:transparent;border:1px dashed var(--overlay0)"></div>
+      </div>
+      <div class="lbl">Background</div>
+      <div class="swatches">
+        <div class="sw" style="background:transparent;border:1px dashed var(--overlay0)"></div><div class="sw on" style="background:#A6E3A1"></div><div class="sw" style="background:#89DCEB"></div><div class="sw" style="background:#F9E2AF"></div><div class="sw" style="background:#11111B"></div>
+      </div>
+      <div class="lbl">Fill — Sloppiness</div>
+      <div class="seg"><span>Hachure</span><span class="on">Solid</span><span>None</span></div>
+      <div style="height:8px"></div>
+      <div class="seg"><span>Artist</span><span class="on">Architect</span><span>Cartoonist</span></div>
+      <div class="lbl">Stroke width · Opacity</div>
+      <input type="range" value="60"><input type="range" value="100">
+    </div>
+
+    <div class="dock">
+      <div class="tabs"><button class="on">Scenes</button><button>Slides</button></div>
+      <div class="docklist">
+        <div class="srow on"><i></i><div><b>product-flow</b><small>3 frames · now</small></div></div>
+        <div class="srow"><i></i><div><b>api-whiteboard</b><small>12 KB · disk</small></div></div>
+        <div class="srow"><i></i><div><b>pitch-deck</b><small>10 slides · notes</small></div></div>
+        <div class="srow"><i></i><div><b>Slide 2 · How it works</b><small>frame → present</small></div></div>
+      </div>
+      <div class="dockfoot"><button class="btn">PDF</button><button class="btn">PPTX</button><button class="btn primary">▶</button></div>
+    </div>
+
+    <div class="zoomctl">
+      <div class="group"><button>↺</button><button>↻</button></div>
+      <div class="group"><button>−</button><button style="width:auto;padding:0 10px;font-size:12px;font-family:'IBM Plex Mono',monospace">100%</button><button>+</button></div>
+      <div class="group"><button>⛶</button><button>?</button></div>
+    </div>
+
+    <div class="ai">
+      <div class="model"><span class="pulse"></span><span id="modelName">ollama · llama3.1:8b · offline</span></div>
+      <input id="aiInput" placeholder="Ask AI: “login flow with retry + ERD…” → editable boxes (mock)">
+      <button class="go">Generate</button>
+    </div>
+
+    <div class="overlay" id="dash">
+      <div class="dialog">
+        <h3>Scenes — unlimited, on disk</h3>
+        <p><code>~/Neattttty/scenes/</code> · collections · trash · import <code>.excalidraw</code> · click outside to close</p>
+        <div class="grid">
+          <div class="card"><b>product-flow</b><br><small>3 frames · Work</small></div>
+          <div class="card"><b>api-whiteboard</b><br><small>Study</small></div>
+          <div class="card"><b>pitch-deck</b><br><small>10 slides</small></div>
+          <div class="card new">＋ New scene<br><small>Ctrl+N</small></div>
+          <div class="card new">⤓ Import<br><small>bulk files</small></div>
+          <div class="card new">🗑 Trash<br><small>30-day restore</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">Confirm: ① Excalidraw-like shell OK? ② Catppuccin flavor default — <b>Mocha</b>? ③ Green accent strength OK? ④ Keep left props + right scenes/slides + bottom AI dock? Reply with changes and I build the real app. Original mock UI, MIT editor underneath, no Plus code. Model toggle (offline/BYOK) will live in the AI dock.</div>
+</div>
+<script>
+  const root=document.documentElement;
+  document.querySelectorAll('.flavors button').forEach(b=>b.addEventListener('click',()=>{
+    document.querySelectorAll('.flavors button').forEach(x=>x.classList.remove('on'));b.classList.add('on');
+    root.dataset.flavor=b.dataset.f;
+  }));
+  document.querySelectorAll('#tools button').forEach(b=>b.addEventListener('click',()=>{
+    document.querySelectorAll('#tools button').forEach(x=>x.classList.remove('on'));b.classList.add('on');
+  }));
+  document.querySelectorAll('.sw').forEach(s=>s.addEventListener('click',()=>{
+    const g=s.parentElement;g.querySelectorAll('.sw').forEach(x=>x.classList.remove('on'));s.classList.add('on');
+  }));
+  const menu=document.getElementById('menu');
+  document.getElementById('burger').addEventListener('click',e=>{e.stopPropagation();menu.classList.toggle('on')});
+  document.addEventListener('click',e=>{if(!menu.contains(e.target))menu.classList.remove('on')});
+  const dash=document.getElementById('dash');
+  document.getElementById('dashBtn').addEventListener('click',()=>dash.classList.add('on'));
+  dash.addEventListener('click',e=>{if(e.target===dash)dash.classList.remove('on')});
+  document.getElementById('libBtn').addEventListener('click',()=>alert('Mock: Library drawer (on-disk .excalidrawlib + search) goes here in the real app.'));
+  const names=['ollama · llama3.1:8b · offline','zen · kimi-k2.5 · chat','zen · gpt-5.5 · responses','custom · my-model','byok · openai / claude / gemini','ollama · qwen2.5-coder · offline'];
+  let mi=0;document.querySelector('.model').addEventListener('click',()=>{mi=(mi+1)%names.length;document.getElementById('modelName').textContent=names[mi]});
+</script>
+</body>
+</html>
