@@ -1,8 +1,11 @@
-// AI diagram generation for Neattttty.
-// Original prompts + layout code. Two provider families:
+// AI diagram generation for Neattttty (official-style: text -> mermaid).
+// The model writes Mermaid diagram code; the editor's own
+// @excalidraw/mermaid-to-excalidraw converter turns it into properly formed,
+// editable canvas elements (preview first, Insert on confirm).
+// Providers:
 //  - offline: Ollama (/api/chat) or any OpenAI-compatible local server (LM Studio)
-//  - byok: OpenAI / OpenRouter / Anthropic / Gemini (or compatible) with user key
-// The model returns a small JSON plan; we convert it to editable Excalidraw elements.
+//  - byok: OpenAI / OpenRouter / Anthropic / Gemini / OpenCode Zen / custom
+//    endpoints with user key
 
 export type AIKind =
   | "ollama"
@@ -38,30 +41,41 @@ export const AI_DEFAULTS: Record<AIKind, { model: string; baseUrl: string }> = {
   custom: { model: "my-model", baseUrl: "https://api.example.com/v1" },
 };
 
-const SYSTEM_PROMPT = `You turn a short request into a simple flowchart plan.
-Reply with ONLY a JSON array, no prose, no code fences. Each item:
-{"label":"short text max 28 chars","shape":"rect"|"diamond"|"ellipse"}
-Rules: 3 to 7 nodes, first node is the start, last node is the end state.
-Use "diamond" for decisions, "ellipse" for start/end, "rect" otherwise.
-Example: [{"label":"Start","shape":"ellipse"},{"label":"Login?","shape":"diamond"},{"label":"Show app","shape":"rect"}]`;
+const SYSTEM_PROMPT = `You turn a short request into a Mermaid diagram.
+Reply with ONLY one valid Mermaid diagram inside a single \`\`\`mermaid fence — no prose, no explanation.
+Default to \`flowchart TD\` unless the request clearly calls for another type (sequenceDiagram for interactions over time, classDiagram for code structure, erDiagram for data models, stateDiagram-v2, mindmap, timeline).
+Rules:
+- One diagram only. Node labels short (max 5 words), plain text, no markdown, no HTML.
+- Simple node ids (A, B, C…). Quote labels with special characters: A["label (x)"].
+- Prefer TD (top-down) layout. Max ~12 nodes.
+Example:
+\`\`\`mermaid
+flowchart TD
+    A[Start] --> B{Logged in?}
+    B -->|Yes| C[Show app]
+    B -->|No| D[Show login]
+\`\`\``;
 
-interface PlanNode {
-  label: string;
-  shape: "rect" | "diamond" | "ellipse";
+const MERMAID_HEADS =
+  /^\s*(flowchart|graph|sequenceDiagram|classDiagram|erDiagram|gantt|pie|mindmap|timeline|journey|stateDiagram(-v2)?|gitGraph|C4Context)\b/im;
+
+function stripFences(text: string): string {
+  const mermaidFence = text.match(/```mermaid\s*([\s\S]*?)```/i);
+  if (mermaidFence) return mermaidFence[1].trim();
+  const anyFence = text.match(/```(?:\w+)?\s*([\s\S]*?)```/i);
+  if (anyFence && MERMAID_HEADS.test(anyFence[1])) return anyFence[1].trim();
+  return text.trim();
 }
 
-function extractJsonArray(text: string): PlanNode[] {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const candidate = (fenced ? fenced[1] : text).trim();
-  const start = candidate.indexOf("[");
-  const end = candidate.lastIndexOf("]");
-  if (start === -1 || end === -1 || end <= start) throw new Error("Model did not return a node list.");
-  const arr = JSON.parse(candidate.slice(start, end + 1)) as PlanNode[];
-  if (!Array.isArray(arr) || arr.length === 0) throw new Error("Model returned an empty plan.");
-  return arr.slice(0, 8).map((n) => ({
-    label: String(n.label ?? "Node").slice(0, 32) || "Node",
-    shape: n.shape === "diamond" || n.shape === "ellipse" ? n.shape : "rect",
-  }));
+/** Pull Mermaid source out of a model reply (fenced or raw). */
+export function extractMermaid(text: string): string {
+  const code = stripFences(text);
+  if (!code) throw new Error("Model returned an empty reply.");
+  if (!MERMAID_HEADS.test(code)) {
+    throw new Error("Model did not return a Mermaid diagram. Try rephrasing, e.g. “as a flowchart”.");
+  }
+  if (code.length > 20000) throw new Error("Model reply too long to diagram.");
+  return code;
 }
 
 /**
@@ -250,107 +264,70 @@ function nid(): string {
   }
 }
 
-/** Convert a node plan into editable Excalidraw elements (vertical flow). */
-export function planToElements(plan: PlanNode[], originX: number, originY: number): any[] {
-  const W = 260;
-  const H = 110;
-  const GAP = 90;
-  const elements: any[] = [];
-  let y = originY;
-
-  const boxType = (shape: PlanNode["shape"]) =>
-    shape === "diamond" ? "diamond" : shape === "ellipse" ? "ellipse" : "rectangle";
-
-  plan.forEach((node, i) => {
-    const id = nid();
-    const textId = nid();
-    elements.push({
-      id,
-      type: boxType(node.shape),
-      x: originX,
-      y,
-      width: W,
-      height: H,
-      angle: 0,
-      strokeColor: "#1e1e2e",
-      backgroundColor: i === 0 ? "#A6D189" : "transparent",
-      fillStyle: "solid",
-      strokeWidth: 2,
-      strokeStyle: "solid",
-      roughness: 1,
-      opacity: 100,
-      roundness: node.shape === "rect" ? { type: 3 } : { type: 2 },
-      boundElements: [{ id: textId, type: "text" }],
-      link: null,
-      locked: false,
-    });
-    elements.push({
-      id: textId,
-      type: "text",
-      x: originX + 16,
-      y: y + H / 2 - 14,
-      width: W - 32,
-      height: 28,
-      angle: 0,
-      strokeColor: "#1e1e2e",
-      backgroundColor: "transparent",
-      fillStyle: "solid",
-      strokeWidth: 1,
-      roughness: 0,
-      opacity: 100,
-      fontSize: 20,
-      fontFamily: 1,
-      textAlign: "center",
-      verticalAlign: "middle",
-      baseline: 24,
-      text: node.label,
-      originalText: node.label,
-      autoResize: true,
-      containerId: id,
-      locked: false,
-    });
-    if (i < plan.length - 1) {
-      elements.push({
-        id: nid(),
-        type: "arrow",
-        x: originX + W / 2,
-        y: y + H,
-        width: 0,
-        height: GAP,
-        angle: 0,
-        strokeColor: "#1e1e2e",
-        backgroundColor: "transparent",
-        fillStyle: "solid",
-        strokeWidth: 2,
-        strokeStyle: "solid",
-        roughness: 1,
-        opacity: 100,
-        roundness: { type: 2 },
-        points: [
-          [0, 0],
-          [0, GAP],
-        ],
-        elbowed: false,
-        startBinding: null,
-        endBinding: null,
-        startArrowhead: null,
-        endArrowhead: "arrow",
-        locked: false,
-      });
-    }
-    y += H + GAP;
-  });
-  return elements;
+export interface MermaidScene {
+  mermaid: string;
+  elements: any[];
+  files: Record<string, any>;
 }
 
-export async function generateDiagram(cfg: AIConfig, prompt: string): Promise<any[]> {
+/**
+ * Ask the model for a diagram. Returns Mermaid source — the caller previews
+ * it and inserts the converted scene on confirm (official-style flow).
+ */
+export async function generateMermaid(cfg: AIConfig, prompt: string): Promise<string> {
   const clean = prompt.trim();
   if (!clean) throw new Error("Type what to diagram first.");
   let raw: string;
   if (cfg.kind === "ollama") raw = await chatOllamaNative(cfg, clean);
   else if (cfg.kind === "anthropic") raw = await chatAnthropic(cfg, clean);
   else raw = await chatOpenAICompatible(cfg, clean);
-  const plan = extractJsonArray(raw);
-  // Place new diagrams right of existing content; App passes a better origin.
-  return planToElements(plan, 120, 120);
+  return extractMermaid(raw);
+}
+
+/**
+ * Convert Mermaid source to a canvas scene with the editor's own converter.
+ * Returned elements are fully formed (correct text binding etc.).
+ *
+ * NOTE: the parser yields *skeletons* — they must go through
+ * convertToExcalidrawElements first, exactly like the editor's own
+ * paste-as-mermaid flow does. Raw skeletons have no real ids/coords and
+ * render as an unreachable, NaN-zoomed mess.
+ */
+export async function mermaidToScene(definition: string): Promise<MermaidScene> {
+  const mermaid = definition.trim();
+  if (!mermaid) throw new Error("Nothing to convert.");
+  const { parseMermaidToExcalidraw } = await import("@excalidraw/mermaid-to-excalidraw");
+  const { convertToExcalidrawElements } = await import("@excalidraw/excalidraw");
+  let skeleton: unknown;
+  let files: Record<string, any> = {};
+  try {
+    const result = (await parseMermaidToExcalidraw(mermaid)) as unknown as {
+      elements: unknown;
+      files?: Record<string, any>;
+    };
+    skeleton = result?.elements;
+    files = result?.files ?? {};
+  } catch (err: any) {
+    throw new Error(`Could not read that diagram: ${String(err?.message ?? err).slice(0, 200)}`);
+  }
+  if (!Array.isArray(skeleton) || skeleton.length === 0) {
+    throw new Error("Converter produced an empty diagram.");
+  }
+  const elements = convertToExcalidrawElements(skeleton as any, { regenerateIds: true }) as any[];
+  if (!Array.isArray(elements) || elements.length === 0) {
+    throw new Error("Converter produced an empty diagram.");
+  }
+  return { mermaid, elements, files };
+}
+
+/** Shift a scene so its left edge lands at targetX (for Insert placement). */
+export function shiftScene(elements: any[], targetX: number): any[] {
+  let minX = Infinity;
+  for (const e of elements) {
+    if (typeof e?.x === "number") minX = Math.min(minX, e.x);
+  }
+  if (!isFinite(minX)) return elements;
+  const dx = targetX - minX;
+  if (dx === 0) return elements;
+  return elements.map((e: any) => ({ ...e, x: (e?.x ?? 0) + dx }));
 }

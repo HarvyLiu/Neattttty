@@ -21,10 +21,12 @@ import {
   Presentation,
   RotateCcw,
   Save,
+  SendHorizontal,
   Shapes,
   SlidersHorizontal,
   Sparkles,
   Trash2,
+  X,
 } from "lucide-react";
 import "./styles.css";
 import {
@@ -42,8 +44,8 @@ import {
   type SceneMeta,
   type TrashedScene,
 } from "./lib/scenes";
-import { AI_DEFAULTS, generateDiagram, type AIConfig, type AIKind } from "./lib/ai";
-import { downloadPng, downloadPptx, downloadSvg, listFrames } from "./lib/exporters";
+import { AI_DEFAULTS, generateMermaid, mermaidToScene, shiftScene, type AIConfig, type AIKind, type MermaidScene } from "./lib/ai";
+import { downloadPng, downloadPptx, downloadSvg, listFrames, svgForElements } from "./lib/exporters";
 
 type Flavor = "latte" | "frappe" | "macchiato" | "mocha";
 const FLAVORS: Flavor[] = ["latte", "frappe", "macchiato", "mocha"];
@@ -158,6 +160,15 @@ export default function App() {
   const [search, setSearch] = useState("");
   const [aiPrompt, setAiPrompt] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiTab, setAiTab] = useState<"generate" | "mermaid">("generate");
+  const [chat, setChat] = useState<Array<{ role: "user" | "assistant"; text: string; time: string }>>([]);
+  const [draftMermaid, setDraftMermaid] = useState("");
+  const [mermaidTabCode, setMermaidTabCode] = useState("");
+  const [previewSvg, setPreviewSvg] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [showCode, setShowCode] = useState(false);
+  const previewSceneRef = useRef<MermaidScene | null>(null);
   const [aiCfg, setAiCfg] = useState<AIConfig>(loadAI);
   const [notes, setNotes] = useState<Record<string, string>>(() => {
     try {
@@ -404,22 +415,35 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeIdSafe]);
 
-  const runAI = async () => {
-    if (aiBusy || !aiPrompt.trim()) return;
+  const stamp = () => new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+  const buildPreview = async (code: string) => {
+    setPreviewError(null);
+    setPreviewSvg(null);
+    previewSceneRef.current = null;
+    const scene = await mermaidToScene(code);
+    const svg = await svgForElements(scene.elements, scene.files);
+    previewSceneRef.current = scene;
+    setDraftMermaid(scene.mermaid);
+    setPreviewSvg(svg);
+    setShowCode(false);
+  };
+
+  const runAiPrompt = async (prompt: string) => {
+    const clean = prompt.trim();
+    if (!clean || aiBusy) return;
+    setAiOpen(true);
+    setAiTab("generate");
     setAiBusy(true);
+    setChat((prev) => [...prev, { role: "user", text: clean, time: stamp() }]);
+    setAiPrompt("");
     try {
-      const fresh = await generateDiagram(aiCfg, aiPrompt);
-      const cur: any[] = apiRef.current?.getSceneElements?.() ?? active?.data.elements ?? [];
-      const maxX = cur.reduce((m: number, e: any) => Math.max(m, (e?.x ?? 0) + (e?.width ?? 0)), 0);
-      const dx = maxX > 0 ? maxX + 120 - 120 : 0;
-      const shifted = fresh.map((e: any) => ({ ...e, x: (e.x ?? 0) + dx }));
-      const next = [...cur, ...shifted];
-      apiRef.current?.updateScene?.({ elements: next });
-      setAiPrompt("");
-      showToast(`AI added ${shifted.length} editable elements`);
+      const code = await generateMermaid(aiCfg, clean);
+      setChat((prev) => [...prev, { role: "assistant", text: code, time: stamp() }]);
+      await buildPreview(code);
     } catch (err: any) {
       const msg = err?.message ?? String(err);
-      if (aiCfg.kind === "ollama" && /failed|fetch|network/i.test(msg)) {
+      if (aiCfg.kind === "ollama" && /failed|fetch|network|unreachable/i.test(msg)) {
         showToast("Ollama not reachable — run `ollama serve` or switch model to BYOK");
       } else {
         showToast(msg);
@@ -427,6 +451,61 @@ export default function App() {
     } finally {
       setAiBusy(false);
     }
+  };
+
+  const refreshPreview = async () => {
+    if (aiBusy || !draftMermaid.trim()) return;
+    setAiBusy(true);
+    try {
+      await buildPreview(draftMermaid);
+    } catch (err: any) {
+      setPreviewError(err?.message ?? String(err));
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  const previewPastedMermaid = async () => {
+    if (aiBusy || !mermaidTabCode.trim()) return;
+    setAiBusy(true);
+    try {
+      await buildPreview(mermaidTabCode);
+    } catch (err: any) {
+      setPreviewError(err?.message ?? String(err));
+      showToast(err?.message ?? String(err));
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  const insertPreview = () => {
+    const scene = previewSceneRef.current;
+    if (!scene || scene.elements.length === 0) {
+      showToast("Nothing to insert — generate or preview first");
+      return;
+    }
+    const cur: any[] = apiRef.current?.getSceneElements?.() ?? active?.data.elements ?? [];
+    let maxX = -Infinity;
+    for (const e of cur) {
+      if (typeof e?.x === "number" && typeof e?.width === "number") maxX = Math.max(maxX, e.x + e.width);
+    }
+    const shifted = shiftScene(scene.elements, isFinite(maxX) ? maxX + 120 : 120);
+    try {
+      apiRef.current?.updateScene?.({ elements: [...cur, ...shifted] });
+    } catch (err: any) {
+      showToast(String(err?.message ?? err));
+      return;
+    }
+    setAiOpen(false);
+    showToast(`Inserted ${shifted.length} editable elements — drag them anywhere`);
+  };
+
+  const newAiChat = () => {
+    setChat([]);
+    setDraftMermaid("");
+    setPreviewSvg(null);
+    setPreviewError(null);
+    previewSceneRef.current = null;
   };
 
   const goToFrame = (idx: number) => {
@@ -785,15 +864,15 @@ export default function App() {
               </span>
             </button>
             <input
-              placeholder="Ask AI: “login flow with retry…” → editable boxes"
+              placeholder="Ask AI: “login flow…” → chat, preview, insert"
               value={aiPrompt}
               onChange={(e) => setAiPrompt(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter") void runAI();
+                if (e.key === "Enter") void runAiPrompt(aiPrompt);
               }}
               disabled={aiBusy}
             />
-            <button className="go" onClick={() => void runAI()} disabled={aiBusy || !aiPrompt.trim()}>
+            <button className="go" onClick={() => void runAiPrompt(aiPrompt)} disabled={aiBusy || !aiPrompt.trim()}>
               {aiBusy ? "…" : <><Sparkles size={14} /> Generate</>}
             </button>
           </div>
@@ -1012,6 +1091,149 @@ export default function App() {
                 Done
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {aiOpen && (
+        <div className="overlay" style={{ position: "fixed" }} onClick={(e) => e.target === e.currentTarget && !aiBusy && setAiOpen(false)}>
+          <div className="dialog ai-dialog">
+            <div className="ai-head">
+              <div className="tabs">
+                <button className={aiTab === "generate" ? "on" : ""} onClick={() => setAiTab("generate")}>
+                  Text to diagram <span className="beta">AI Beta</span>
+                </button>
+                <button className={aiTab === "mermaid" ? "on" : ""} onClick={() => setAiTab("mermaid")}>
+                  Mermaid
+                </button>
+              </div>
+              <button className="iconbtn" onClick={() => !aiBusy && setAiOpen(false)} aria-label="Close AI dialog">
+                <X size={16} />
+              </button>
+            </div>
+            {aiTab === "generate" ? (
+              <div className="ai-body">
+                <div className="chat-col">
+                  <div className="chat-top">
+                    <span className="mono" style={{ fontSize: 11, color: "var(--subtext0)" }}>
+                      {KIND_LABELS[aiCfg.kind]} · {aiCfg.model}
+                    </span>
+                    <button className="btn" style={{ height: 28, fontSize: 12 }} onClick={newAiChat} disabled={aiBusy}>
+                      New chat
+                    </button>
+                  </div>
+                  <div className="chat-list">
+                    {chat.length === 0 && (
+                      <div style={{ fontSize: 13, color: "var(--subtext0)" }}>
+                        Describe a diagram — e.g. “login flow with retry”, “ERD for users and orders”.
+                        The assistant drafts Mermaid code; you preview it and insert what you like.
+                      </div>
+                    )}
+                    {chat.map((m, i) => (
+                      <div key={i} className={`msg ${m.role}`}>
+                        <div className="msg-head">
+                          <b>{m.role === "user" ? "You" : "AI Assistant"}</b>
+                          <small>{m.time}</small>
+                        </div>
+                        {m.role === "user" ? (
+                          <div>{m.text}</div>
+                        ) : (
+                          <pre>{m.text}</pre>
+                        )}
+                      </div>
+                    ))}
+                    {aiBusy && <div style={{ fontSize: 13, color: "var(--subtext0)" }}>Drafting diagram…</div>}
+                  </div>
+                  <div className="ai-inputrow">
+                    <input
+                      placeholder="Continue refining your diagram…"
+                      value={aiPrompt}
+                      onChange={(e) => setAiPrompt(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") void runAiPrompt(aiPrompt);
+                      }}
+                      disabled={aiBusy}
+                    />
+                    <button className="btn primary" onClick={() => void runAiPrompt(aiPrompt)} disabled={aiBusy || !aiPrompt.trim()} aria-label="Send">
+                      <SendHorizontal size={15} />
+                    </button>
+                  </div>
+                </div>
+                <div className="preview-col">
+                  <div className="preview-card">
+                    {previewError ? (
+                      <div className="preview-error">{previewError}</div>
+                    ) : previewSvg && !showCode ? (
+                      <div className="preview-svg" dangerouslySetInnerHTML={{ __html: previewSvg }} />
+                    ) : (
+                      <textarea
+                        className="preview-code"
+                        value={draftMermaid}
+                        onChange={(e) => setDraftMermaid(e.target.value)}
+                        placeholder="Mermaid code appears here — edit it, then Update preview."
+                        spellCheck={false}
+                      />
+                    )}
+                  </div>
+                  <div className="preview-foot">
+                    <button className="linklike" onClick={() => setShowCode((v) => !v)}>
+                      {showCode ? "View preview →" : "View as Mermaid →"}
+                    </button>
+                    {!showCode && draftMermaid && (
+                      <button className="btn" style={{ height: 30, fontSize: 12 }} onClick={() => void refreshPreview()} disabled={aiBusy}>
+                        Update preview
+                      </button>
+                    )}
+                    <button className="btn primary" onClick={insertPreview} disabled={!previewSceneRef.current || aiBusy}>
+                      <Plus size={14} /> Insert →
+                    </button>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: "var(--subtext0)" }}>
+                    Insert places editable shapes on your canvas — move, restyle, ungroup freely.
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="ai-body single">
+                <div className="chat-col">
+                  <div style={{ fontSize: 13, color: "var(--subtext0)" }}>
+                    Paste any Mermaid diagram (flowchart, sequence, class, ER…) to preview it and insert it as
+                    editable shapes.
+                  </div>
+                  <textarea
+                    className="preview-code tall"
+                    value={mermaidTabCode}
+                    onChange={(e) => setMermaidTabCode(e.target.value)}
+                    placeholder={"flowchart TD\n    A[Start] --> B{Ready?}\n    B -->|Yes| C[Go]"}
+                    spellCheck={false}
+                  />
+                  <div className="row" style={{ marginTop: 8 }}>
+                    <button className="btn primary" onClick={() => void previewPastedMermaid()} disabled={aiBusy || !mermaidTabCode.trim()}>
+                      Preview
+                    </button>
+                  </div>
+                </div>
+                <div className="preview-col">
+                  <div className="preview-card">
+                    {previewError ? (
+                      <div className="preview-error">{previewError}</div>
+                    ) : previewSvg ? (
+                      <div className="preview-svg" dangerouslySetInnerHTML={{ __html: previewSvg }} />
+                    ) : (
+                      <div style={{ fontSize: 13, color: "var(--subtext0)", padding: 12 }}>
+                        Preview appears here.
+                      </div>
+                    )}
+                  </div>
+                  <div className="preview-foot">
+                    <span />
+                    <button className="btn primary" onClick={insertPreview} disabled={!previewSceneRef.current || aiBusy}>
+                      <Plus size={14} /> Insert →
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

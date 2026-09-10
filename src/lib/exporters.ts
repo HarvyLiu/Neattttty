@@ -27,6 +27,16 @@ export async function downloadSvg(elements: any[], files: any): Promise<void> {
   downloadText("neattttty.svg", text, "image/svg+xml");
 }
 
+/** Render elements to an SVG markup string (for the AI preview pane). */
+export async function svgForElements(elements: any[], files: any): Promise<string> {
+  const svg = await exportToSvg({
+    elements,
+    appState: { viewBackgroundColor: "#ffffff" } as any,
+    files: files ?? {},
+  } as any);
+  return new XMLSerializer().serializeToString(svg);
+}
+
 interface FrameInfo {
   id: string;
   name: string;
