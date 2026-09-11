@@ -652,15 +652,30 @@ export default function App() {
             </div>
             <div>
               {filtered.map((s) => (
-                <button key={s.id} className={`scene-row${s.id === activeIdSafe ? " on" : ""}`} onClick={() => switchScene(s.id)}>
-                  <span className="thumb" />
-                  <span style={{ minWidth: 0 }}>
-                    <b>{s.name}</b>
-                    <small>
-                      {s.collection} · {new Date(s.updatedAt).toLocaleDateString()}
-                    </small>
-                  </span>
-                </button>
+                <div key={s.id} className="scene-row-wrap" style={{ position: "relative" }}>
+                  <button className={`scene-row${s.id === activeIdSafe ? " on" : ""}`} onClick={() => switchScene(s.id)}>
+                    <span className="thumb" />
+                    <span style={{ minWidth: 0 }}>
+                      <b>{s.name}</b>
+                      <small>
+                        {s.collection} · {new Date(s.updatedAt).toLocaleDateString()}
+                      </small>
+                    </span>
+                  </button>
+                  {scenes.length > 1 && (
+                    <button
+                      className="scene-del"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        trashScene(s.id);
+                      }}
+                      aria-label={`Delete ${s.name}`}
+                      title="Delete"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  )}
+                </div>
               ))}
               {filtered.length === 0 && <div style={{ fontSize: 12, color: "var(--subtext0)", padding: "0 4px" }}>No matches.</div>}
             </div>
