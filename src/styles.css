@@ -19,7 +19,7 @@ code,.mono{font-family:var(--font-mono)}
 *::-webkit-scrollbar{width:10px;height:10px}
 *::-webkit-scrollbar-thumb{background:var(--surface2);border-radius:8px;border:2px solid transparent;background-clip:content-box}
 *::-webkit-scrollbar-track{background:transparent}
-.appbar :focus-visible,.rail :focus-visible,.slides-dock :focus-visible,.ai-dock :focus-visible,.menu :focus-visible,.dialog :focus-visible,.present-bar :focus-visible{outline:2px solid var(--green);outline-offset:2px;border-radius:6px}
+.appbar :focus-visible,.rail :focus-visible,.ai-dock :focus-visible,.menu :focus-visible,.dialog :focus-visible,.present-bar :focus-visible{outline:2px solid var(--green);outline-offset:2px;border-radius:6px}
 
 .app{display:flex;flex-direction:column;height:100vh;background:var(--crust);color:var(--text)}
 .appbar{display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--mantle);border-bottom:1px solid var(--panel-border);z-index:30;-webkit-app-region:drag}
@@ -104,6 +104,14 @@ html[data-flavor="latte"] .saved{color:var(--green-deep)}
 .lib-cell:hover{border-color:var(--green)}
 .lib-cell svg{width:100%;height:auto;max-height:84px;display:block}
 .lib-cell:disabled{opacity:.5;cursor:default}
+
+/* Our tab pages inside the native sidebar (replaces the old floating dock) */
+.neat-tab{padding:12px 12px 14px;display:flex;flex-direction:column;gap:10px;overflow-y:auto}
+.neat-tab .list{padding:0;display:flex;flex-direction:column;gap:6px}
+.neat-tab .note-card{margin:0}
+.neat-tab .dock-foot{padding:10px 0 0}
+.neat-tab .lib-hint{padding:0}
+.neat-tab .lib-grid{padding:0;max-height:none;overflow:visible}
 .trash-box{margin-top:auto;background:color-mix(in srgb,var(--yellow) 12%,transparent);border:1px dashed var(--yellow);border-radius:10px;padding:9px 10px;font-size:12px}
 
 .canvas-zone{position:relative;flex:1;min-width:0;background:var(--canvas)}
@@ -122,11 +130,6 @@ html[data-flavor="latte"] .saved{color:var(--green-deep)}
 .go:hover{filter:brightness(1.06)}
 .go:disabled{opacity:.55;cursor:wait}
 
-.slides-dock{position:absolute;right:12px;top:12px;width:236px;background:var(--panel);border:1px solid var(--panel-border);border-radius:14px;z-index:20;overflow:hidden}
-.slides-dock .tabs{display:flex;background:var(--surface0);margin:8px;border-radius:10px;padding:3px}
-.slides-dock .tabs button{flex:1;border:0;background:transparent;color:var(--subtext1);font:600 12px var(--font-ui);padding:6px;border-radius:8px;cursor:pointer}
-.slides-dock .tabs button.on{background:var(--panel);color:var(--text)}
-.slides-dock .list{padding:0 8px 8px;display:flex;flex-direction:column;gap:6px;max-height:300px;overflow-y:auto}
 .slide-row{display:flex;gap:8px;align-items:center;border:1px solid var(--panel-border);border-radius:10px;padding:7px;background:var(--input);cursor:pointer;color:var(--text);font:400 12px var(--font-ui);text-align:left;width:100%;transition:border-color .12s ease}
 .slide-row:hover{border-color:var(--overlay0)}
 .slide-row.on{border-color:var(--green)}
@@ -203,4 +206,4 @@ label.f input:focus,label.f select:focus{border-color:var(--green)}
 .present-bar .btn{height:30px;font-size:12px}
 .toast{position:absolute;bottom:70px;left:50%;transform:translateX(-50%);background:var(--panel);border:1px solid var(--green);color:var(--text);border-radius:999px;padding:8px 16px;font-size:13px;font-weight:500;z-index:70;box-shadow:0 8px 24px -8px rgba(0,0,0,.5);white-space:nowrap}
 .kbd{font-family:var(--font-mono);background:var(--surface0);border:1px solid var(--panel-border);border-radius:5px;padding:0 6px;font-size:11px}
-@media(max-width:900px){.rail{display:none}.rail.hidden{display:none}.slides-dock{display:none}.flavors{display:none}}
+@media(max-width:900px){.rail{display:none}.rail.hidden{display:none}.flavors{display:none}}

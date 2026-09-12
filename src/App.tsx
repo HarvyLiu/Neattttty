@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Excalidraw } from "@excalidraw/excalidraw";
+import { Excalidraw, Sidebar } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import {
   Bot,
@@ -19,6 +19,7 @@ import {
   Library,
   Menu,
   PanelLeft,
+  PanelRight,
   Pencil,
   Play,
   Plus,
@@ -62,6 +63,7 @@ import {
   PERSONAL_ID,
   addLibraryItems,
   addPersonalItem,
+  centerElementsInView,
   cloneElementsFresh,
   importLibraryFile,
   importLibraryFromUrl,
@@ -81,6 +83,9 @@ import { downloadPng, downloadPptx, downloadSvg, listFrames, svgForElements } fr
 
 type Flavor = "latte" | "frappe" | "macchiato" | "mocha";
 const FLAVORS: Flavor[] = ["latte", "frappe", "macchiato", "mocha"];
+
+/** Name of our custom native sidebar (Slides / Scenes / Library tabs). */
+const PANEL_NAME = "neattttty";
 
 const AI_STORE_KEY = "neattttty.ai.v1";
 const NOTES_KEY = "neattttty.notes.v1";
@@ -194,7 +199,7 @@ export default function App() {
     return FLAVORS.includes(f as Flavor) ? (f as Flavor) : "mocha";
   });
   const [railOpen, setRailOpen] = useState(true);
-  const [dockTab, setDockTab] = useState<"slides" | "scenes" | "library">("slides");
+  const [panel, setPanel] = useState<{ tab: string } | null>(null);
   const [selectedCount, setSelectedCount] = useState(0);
   const [libThumbs, setLibThumbs] = useState<Record<string, string>>({});
   const [menuOpen, setMenuOpen] = useState(false);
@@ -396,10 +401,11 @@ export default function App() {
     showToast(`Folder "${name}" created`);
   };
 
-  /** Push items into the editor's native Library panel (merge + open it). */
+  /** Push items into the editor library and open our sidebar on the Library tab. */
   const pushLibraryToEditor = (items: any[]) => {
     try {
-      apiRef.current?.updateLibrary?.({ libraryItems: items, merge: true, openLibraryMenu: true });
+      apiRef.current?.updateLibrary?.({ libraryItems: items, merge: true });
+      apiRef.current?.updateScene?.({ appState: { openSidebar: { name: PANEL_NAME, tab: "library" } } });
     } catch {
       /* panel picks them up on next mount via initialData; the store already saved */
     }
@@ -455,7 +461,7 @@ export default function App() {
     }
   };
 
-  /** One-click stamp: clone a library item with fresh ids, place right of work. */
+  /** One-click stamp: clone a library item with fresh ids, centered in view. */
   const insertLibraryItem = (itemId: string) => {
     const item = libStore.items.find((i) => i?.id === itemId);
     if (!item?.elements?.length) {
@@ -464,23 +470,20 @@ export default function App() {
     }
     const fresh = cloneElementsFresh(item.elements);
     const cur: any[] = apiRef.current?.getSceneElements?.() ?? active?.data.elements ?? [];
-    let maxX = -Infinity;
-    for (const e of cur) {
-      if (typeof e?.x === "number" && typeof e?.width === "number") maxX = Math.max(maxX, e.x + e.width);
-    }
-    const shifted = shiftScene(fresh, isFinite(maxX) ? maxX + 120 : 120);
+    let view = {};
     try {
-      apiRef.current?.updateScene?.({ elements: [...cur, ...shifted] });
+      view = apiRef.current?.getAppState?.() ?? {};
+    } catch {
+      /* fall back to defaults inside the helper */
+    }
+    const placed = centerElementsInView(fresh, view);
+    try {
+      apiRef.current?.updateScene?.({ elements: [...cur, ...placed] });
     } catch (err: any) {
       showToast(String(err?.message ?? err));
       return;
     }
-    try {
-      apiRef.current?.scrollToContent?.(shifted, { fitToContent: true });
-    } catch {
-      /* older API — ignore */
-    }
-    showToast(`Stamped ${shifted.length} element(s) — drag anywhere`);
+    showToast(`Stamped ${placed.length} element(s) — drag anywhere`);
   };
 
   /** Save the current canvas selection as a Personal library item. */
@@ -890,6 +893,31 @@ export default function App() {
     showToast(`Deleted slide "${label}"`);
   };
 
+  /** Toggle our custom native sidebar (Slides / Scenes / Library tabs). */
+  const togglePanel = (tab?: string) => {
+    const api = apiRef.current;
+    if (!api) return;
+    const target = tab ?? panel?.tab ?? "slides";
+    try {
+      if (typeof api.toggleSidebar === "function") {
+        api.toggleSidebar({ name: PANEL_NAME, tab: target });
+        return;
+      }
+    } catch {
+      /* fall through to updateScene */
+    }
+    try {
+      const cur = api.getAppState?.()?.openSidebar;
+      if (cur?.name === PANEL_NAME && (!tab || cur.tab === tab)) {
+        api.updateScene?.({ appState: { openSidebar: null } });
+      } else {
+        api.updateScene?.({ appState: { openSidebar: { name: PANEL_NAME, tab: target } } });
+      }
+    } catch {
+      /* ignore */
+    }
+  };
+
   const startPresent = () => {
     if (frames.length === 0) {
       showToast("Add a Frame (▦ tool) to make slides first");
@@ -1036,6 +1064,14 @@ export default function App() {
           ))}
         </div>
         <div className="actions">
+          <button
+            className="btn"
+            onClick={() => togglePanel()}
+            title={panel ? `Hide panel (${panel.tab})` : "Show panel (Slides · Scenes · Library)"}
+            aria-expanded={!!panel}
+          >
+            <PanelRight size={14} /> Panel
+          </button>
           <button className="btn" onClick={() => setRailOpen((v) => !v)} title="Toggle scenes panel">
             <PanelLeft size={14} /> {railOpen ? "Hide" : "Scenes"}
           </button>
@@ -1158,7 +1194,147 @@ export default function App() {
                 excalidrawAPI={(api: any) => {
                   apiRef.current = api;
                 }}
-              />
+              >
+                <Sidebar
+                  name={PANEL_NAME}
+                  onStateChange={(state) => setPanel(state ? { tab: state.tab ?? "slides" } : null)}
+                >
+                  <Sidebar.Header>Neattttty</Sidebar.Header>
+                  <Sidebar.TabTriggers>
+                    <Sidebar.TabTrigger tab="slides">
+                      Slides{frames.length > 0 ? ` (${frames.length})` : ""}
+                    </Sidebar.TabTrigger>
+                    <Sidebar.TabTrigger tab="scenes">Scenes</Sidebar.TabTrigger>
+                    <Sidebar.TabTrigger tab="library">
+                      Library{libStore.items.length > 0 ? ` (${libStore.items.length})` : ""}
+                    </Sidebar.TabTrigger>
+                  </Sidebar.TabTriggers>
+                  <Sidebar.Tabs>
+                    <Sidebar.Tab tab="slides">
+                      <div className="neat-tab">
+                        <div className="list">
+                          {frames.length === 0 && (
+                            <div style={{ fontSize: 12, color: "var(--subtext0)", padding: 4 }}>
+                              No frames yet. Use the <b>▦ Frame</b> tool on the canvas toolbar, then each frame becomes a slide here.
+                            </div>
+                          )}
+                          {frames.map((f, i) => (
+                            <div key={f.id} className="scene-row-wrap">
+                              <button className={`slide-row${i === presentIdx ? " on" : ""}`} onClick={() => goToFrame(i)}>
+                                <i />
+                                <span>
+                                  <b style={{ fontSize: 12.5 }}>{i + 1} · {f.name}</b>
+                                </span>
+                              </button>
+                              <button
+                                className="scene-del"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  deleteFrame(f.id);
+                                }}
+                                aria-label={`Delete slide ${f.name}`}
+                                title="Delete slide"
+                              >
+                                <Trash2 size={12} />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                        {frames.length > 0 && (
+                          <div className="note-card">
+                            <div style={{ fontSize: 11, color: "var(--subtext0)", marginBottom: 4 }}>Presenter note — slide {presentIdx + 1}</div>
+                            <textarea
+                              placeholder="Talking points… (saved locally)"
+                              value={notes[noteKey] ?? ""}
+                              onChange={(e) => setNotes((prev) => ({ ...prev, [noteKey]: e.target.value }))}
+                            />
+                          </div>
+                        )}
+                        <div className="dock-foot">
+                          <button className="btn" onClick={() => void exportPdf()}>
+                            <FileText size={14} /> PDF
+                          </button>
+                          <button
+                            className="btn"
+                            onClick={() =>
+                              void downloadPptx(active?.data.elements ?? [], active?.data.files ?? {}, active?.name ?? "deck").catch((e) =>
+                                showToast(String(e)),
+                              )
+                            }
+                          >
+                            <Presentation size={14} /> PPTX
+                          </button>
+                          <button className="btn primary" onClick={startPresent}>
+                            <Play size={14} />
+                          </button>
+                        </div>
+                      </div>
+                    </Sidebar.Tab>
+                    <Sidebar.Tab tab="scenes">
+                      <div className="neat-tab">
+                        <div className="list">
+                          {scenes.slice(0, 6).map((s) => (
+                            <button key={s.id} className={`slide-row${s.id === activeIdSafe ? " on" : ""}`} onClick={() => switchScene(s.id)}>
+                              <i />
+                              <span>
+                                <b style={{ fontSize: 12.5 }}>{s.name}</b>
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                        <div className="dock-foot">
+                          <button className="btn" style={{ flex: 1 }} onClick={() => setDashOpen(true)}>
+                            Open dashboard
+                          </button>
+                        </div>
+                      </div>
+                    </Sidebar.Tab>
+                    <Sidebar.Tab tab="library">
+                      <div className="neat-tab">
+                        <div className="lib-hint">
+                          Click an item to stamp it in front of you. Select canvas elements →{" "}
+                          <b>Add selection</b> saves them to Personal.
+                        </div>
+                        <div className="lib-grid">
+                          {libStore.items.map((it) => (
+                            <button
+                              key={it.id}
+                              className="lib-cell"
+                              title={`Stamp ${(it.elements ?? []).length} element(s)`}
+                              onClick={() => insertLibraryItem(it.id)}
+                            >
+                              {libThumbs[it.id] ? (
+                                <span style={{ width: "100%" }} dangerouslySetInnerHTML={{ __html: libThumbs[it.id] }} />
+                              ) : (
+                                <span className="mono" style={{ fontSize: 10, color: "#888" }}>
+                                  {(it.elements ?? []).length} els
+                                </span>
+                              )}
+                            </button>
+                          ))}
+                          {libStore.items.length === 0 && (
+                            <div className="lib-hint">Empty — import a pack via ☰ → Libraries…</div>
+                          )}
+                        </div>
+                        <div className="dock-foot">
+                          <button
+                            className="btn"
+                            style={{ flex: 1 }}
+                            disabled={selectedCount === 0}
+                            onClick={addSelectionToLibrary}
+                            title={selectedCount === 0 ? "Select elements on the canvas first" : "Save selection to Personal library"}
+                          >
+                            <Plus size={14} /> Add selection{selectedCount > 0 ? ` (${selectedCount})` : ""}
+                          </button>
+                          <button className="btn" style={{ flex: 1 }} onClick={() => setLibOpen(true)}>
+                            Manage…
+                          </button>
+                        </div>
+                      </div>
+                    </Sidebar.Tab>
+                  </Sidebar.Tabs>
+                </Sidebar>
+              </Excalidraw>
             </div>
           )}
 
@@ -1247,140 +1423,6 @@ export default function App() {
               </button>
             </div>
           )}
-
-          <div className="slides-dock" onContextMenu={(e) => e.preventDefault()}>
-            <div className="tabs">
-              <button className={dockTab === "slides" ? "on" : ""} onClick={() => setDockTab("slides")}>
-                Slides {frames.length > 0 ? `(${frames.length})` : ""}
-              </button>
-              <button className={dockTab === "scenes" ? "on" : ""} onClick={() => setDockTab("scenes")}>
-                Scenes
-              </button>
-              <button className={dockTab === "library" ? "on" : ""} onClick={() => setDockTab("library")}>
-                Library{libStore.items.length > 0 ? ` (${libStore.items.length})` : ""}
-              </button>
-            </div>
-            {dockTab === "slides" ? (
-              <>
-                <div className="list">
-                  {frames.length === 0 && (
-                    <div style={{ fontSize: 12, color: "var(--subtext0)", padding: 4 }}>
-                      No frames yet. Use the <b>▦ Frame</b> tool on the canvas toolbar, then each frame becomes a slide here.
-                    </div>
-                  )}
-                  {frames.map((f, i) => (
-                    <div key={f.id} className="scene-row-wrap">
-                      <button className={`slide-row${i === presentIdx ? " on" : ""}`} onClick={() => goToFrame(i)}>
-                        <i />
-                        <span>
-                          <b style={{ fontSize: 12.5 }}>{i + 1} · {f.name}</b>
-                        </span>
-                      </button>
-                      <button
-                        className="scene-del"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          deleteFrame(f.id);
-                        }}
-                        aria-label={`Delete slide ${f.name}`}
-                        title="Delete slide"
-                      >
-                        <Trash2 size={12} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-                {frames.length > 0 && (
-                  <div className="note-card">
-                    <div style={{ fontSize: 11, color: "var(--subtext0)", marginBottom: 4 }}>Presenter note — slide {presentIdx + 1}</div>
-                    <textarea
-                      placeholder="Talking points… (saved locally)"
-                      value={notes[noteKey] ?? ""}
-                      onChange={(e) => setNotes((prev) => ({ ...prev, [noteKey]: e.target.value }))}
-                    />
-                  </div>
-                )}
-                <div className="dock-foot">
-                  <button className="btn" onClick={() => void exportPdf()}>
-                    <FileText size={14} /> PDF
-                  </button>
-                  <button
-                    className="btn"
-                    onClick={() =>
-                      void downloadPptx(active?.data.elements ?? [], active?.data.files ?? {}, active?.name ?? "deck").catch((e) =>
-                        showToast(String(e)),
-                      )
-                    }
-                  >
-                    <Presentation size={14} /> PPTX
-                  </button>
-                  <button className="btn primary" onClick={startPresent}>
-                    <Play size={14} />
-                  </button>
-                </div>
-              </>
-            ) : dockTab === "scenes" ? (
-              <>
-                <div className="list">
-                  {scenes.slice(0, 6).map((s) => (
-                    <button key={s.id} className={`slide-row${s.id === activeIdSafe ? " on" : ""}`} onClick={() => switchScene(s.id)}>
-                      <i />
-                      <span>
-                        <b style={{ fontSize: 12.5 }}>{s.name}</b>
-                      </span>
-                    </button>
-                  ))}
-                </div>
-                <div className="dock-foot">
-                  <button className="btn" style={{ flex: 1 }} onClick={() => setDashOpen(true)}>
-                    Open dashboard
-                  </button>
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="lib-hint">
-                  Click an item to stamp it right of your work. Select canvas elements →{" "}
-                  <b>Add selection</b> saves them to Personal.
-                </div>
-                <div className="lib-grid">
-                  {libStore.items.map((it) => (
-                    <button
-                      key={it.id}
-                      className="lib-cell"
-                      title={`Stamp ${(it.elements ?? []).length} element(s)`}
-                      onClick={() => insertLibraryItem(it.id)}
-                    >
-                      {libThumbs[it.id] ? (
-                        <span style={{ width: "100%" }} dangerouslySetInnerHTML={{ __html: libThumbs[it.id] }} />
-                      ) : (
-                        <span className="mono" style={{ fontSize: 10, color: "#888" }}>
-                          {(it.elements ?? []).length} els
-                        </span>
-                      )}
-                    </button>
-                  ))}
-                  {libStore.items.length === 0 && (
-                    <div className="lib-hint">Empty — import a pack via ☰ → Libraries…</div>
-                  )}
-                </div>
-                <div className="dock-foot">
-                  <button
-                    className="btn"
-                    style={{ flex: 1 }}
-                    disabled={selectedCount === 0}
-                    onClick={addSelectionToLibrary}
-                    title={selectedCount === 0 ? "Select elements on the canvas first" : "Save selection to Personal library"}
-                  >
-                    <Plus size={14} /> Add selection{selectedCount > 0 ? ` (${selectedCount})` : ""}
-                  </button>
-                  <button className="btn" style={{ flex: 1 }} onClick={() => setLibOpen(true)}>
-                    Manage…
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
 
           <div className="ai-dock" onContextMenu={(e) => e.preventDefault()}>
             <button className="model" onClick={() => setAiSettingsOpen(true)} title="AI model settings">

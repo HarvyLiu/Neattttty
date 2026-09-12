@@ -147,6 +147,43 @@ export function cloneElementsFresh(elements: any[]): any[] {
   });
 }
 
+export interface CanvasView {
+  scrollX?: number;
+  scrollY?: number;
+  width?: number;
+  height?: number;
+  zoom?: number | { value?: number };
+}
+
+/**
+ * Shift elements so their bounding-box center lands on the viewport center.
+ * Stamps appear in front of the user; the camera never moves.
+ */
+export function centerElementsInView(elements: any[], view: CanvasView): any[] {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const e of elements ?? []) {
+    if (typeof e?.x !== "number" || typeof e?.y !== "number") continue;
+    minX = Math.min(minX, e.x);
+    minY = Math.min(minY, e.y);
+    maxX = Math.max(maxX, e.x + (e.width ?? 0));
+    maxY = Math.max(maxY, e.y + (e.height ?? 0));
+  }
+  if (!isFinite(minX) || !isFinite(minY)) return elements;
+  const z =
+    typeof view?.zoom === "number" ? view.zoom : (view?.zoom?.value ?? 1) || 1;
+  const vw = view?.width ?? 800;
+  const vh = view?.height ?? 600;
+  const cx = vw / 2 / z - (view?.scrollX ?? 0);
+  const cy = vh / 2 / z - (view?.scrollY ?? 0);
+  const dx = cx - (minX + maxX) / 2;
+  const dy = cy - (minY + maxY) / 2;
+  if (dx === 0 && dy === 0) return elements;
+  return elements.map((e: any) => ({ ...e, x: (e?.x ?? 0) + dx, y: (e?.y ?? 0) + dy }));
+}
+
 /** Save canvas-selected elements as a Personal library item. */
 export function addPersonalItem(store: LibraryStore, elements: any[]): LibraryStore {
   const snap = JSON.parse(JSON.stringify(elements ?? []));
