@@ -1897,6 +1897,9 @@ export default function App() {
               <span className="kbd">←</span>, exit with <span className="kbd">esc</span>. AI dock: offline Ollama by default, BYOK in
               model settings. Not affiliated with Excalidraw.
             </p>
+            <p className="mono" style={{ fontSize: 11 }}>
+              build {typeof __APP_COMMIT__ !== "undefined" ? __APP_COMMIT__ : "dev"}
+            </p>
             <div className="row">
               <button className="btn primary" onClick={() => setHelpOpen(false)}>
                 Close

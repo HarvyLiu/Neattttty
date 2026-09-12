@@ -155,15 +155,92 @@ interface Raster {
   data: Uint8ClampedArray;
   w: number;
   h: number;
-  vbX: number;
-  vbY: number;
+  /** scene -> raster: px = (scene + off) * scale */
+  offX: number;
+  offY: number;
   scale: number; // raster px per scene unit
 }
 
-/** Render elements to a pixel buffer with an exact scene mapping (via SVG viewBox). */
-async function rasterize(elements: any[], files: any): Promise<Raster> {
+/** Absolute content bbox of elements (shapes via x/y/w/h, strokes via points). */
+function contentBBox(els: any[]): [number, number, number, number] | null {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let any = false;
+  for (const e of els) {
+    if (typeof e?.x !== "number" || typeof e?.y !== "number") continue;
+    let x1 = e.x;
+    let y1 = e.y;
+    let x2 = e.x + (e.width ?? 0);
+    let y2 = e.y + (e.height ?? 0);
+    if ((e.type === "line" || e.type === "freedraw") && Array.isArray(e.points)) {
+      for (const p of e.points) {
+        if (!Array.isArray(p)) continue;
+        x1 = Math.min(x1, e.x + p[0]);
+        y1 = Math.min(y1, e.y + p[1]);
+        x2 = Math.max(x2, e.x + p[0]);
+        y2 = Math.max(y2, e.y + p[1]);
+      }
+    }
+    minX = Math.min(minX, x1);
+    minY = Math.min(minY, y1);
+    maxX = Math.max(maxX, x2);
+    maxY = Math.max(maxY, y2);
+    any = true;
+  }
+  return any ? [minX, minY, maxX, maxY] : null;
+}
+
+// Element types whose export markup is a single top-level translated group
+// (verified against real exports). Anything else stops calibration pairing.
+const CALIBRATABLE = new Set(["rectangle", "ellipse", "diamond", "line", "freedraw", "text"]);
+
+/**
+ * Render elements to a pixel buffer with an EXACT scene mapping.
+ *
+ * exportToSvg always rebases content to a 0-origin viewBox, so the viewBox
+ * alone cannot map clicks. Instead we prepend a 2px calibration marker at a
+ * known scene position: its rendered `<g transform>` gives the true offset,
+ * verified for consensus against the leading shape-like elements.
+ */
+async function rasterize(
+  elements: any[],
+  files: any,
+  debug?: (info: Record<string, unknown>) => void,
+): Promise<Raster> {
+  const box = contentBBox(elements);
+  const markerX = (box ? box[0] : 0) - 50;
+  const markerY = (box ? box[1] : 0) - 50;
+  const marker = {
+    id: "__calib",
+    type: "rectangle",
+    x: markerX,
+    y: markerY,
+    width: 2,
+    height: 2,
+    angle: 0,
+    strokeColor: "#000000",
+    backgroundColor: "transparent",
+    fillStyle: "solid",
+    strokeWidth: 2,
+    strokeStyle: "solid",
+    roughness: 0,
+    opacity: 100,
+    groupIds: [],
+    frameId: null,
+    roundness: null,
+    boundElements: [],
+    link: null,
+    locked: false,
+    seed: 1,
+    version: 1,
+    versionNonce: 1,
+    isDeleted: false,
+    updated: 1,
+  };
   const svg = await exportToSvg({
-    elements,
+    elements: [marker, ...elements],
     appState: { viewBackgroundColor: "#ffffff" } as any,
     files: files ?? {},
   } as any);
@@ -173,10 +250,36 @@ async function rasterize(elements: any[], files: any): Promise<Raster> {
   if (!vb || !wm) throw new Error("Could not rasterize the scene");
   const nums = vb[1].trim().split(/[\s,]+/).map(Number);
   if (nums.length < 4 || nums.some((n) => !isFinite(n))) throw new Error("Could not rasterize the scene");
-  const [vbX, vbY, vbW, vbH] = nums;
+  const vbW = nums[2];
+  const vbH = nums[3];
   if (!(vbW > 0) || !(vbH > 0)) throw new Error("Could not rasterize the scene");
   const cw = Number(wm[1]);
   if (!(cw > 0)) throw new Error("Could not rasterize the scene");
+  const scale = cw / vbW;
+  // Calibrate: marker renders first; verify consensus on leading shapes.
+  const stripped = text.replace(/<defs>[\s\S]*?<\/defs>/, "");
+  const matches = [
+    ...stripped.matchAll(/<g\b[^>]*\btransform="translate\(\s*(-?[\d.eE+]+)[,\s]+(-?[\d.eE+]+)/g),
+  ].map((m) => [Number(m[1]), Number(m[2])] as [number, number]);
+  if (matches.length === 0) throw new Error("Could not map the canvas");
+  const offs: [number, number][] = [[matches[0][0] - markerX, matches[0][1] - markerY]];
+  let mi = 1;
+  for (const e of elements) {
+    if (mi >= matches.length) break;
+    if (e?.angle || !CALIBRATABLE.has(e?.type)) break; // stop at first complex element
+    if (typeof e?.x !== "number" || typeof e?.y !== "number") break;
+    offs.push([matches[mi][0] - e.x, matches[mi][1] - e.y]);
+    mi++;
+  }
+  const oxs = offs.map((o) => o[0]).sort((a, b) => a - b);
+  const oys = offs.map((o) => o[1]).sort((a, b) => a - b);
+  const med = (a: number[]) => a[Math.floor(a.length / 2)];
+  const offX = med(oxs);
+  const offY = med(oys);
+  if (offs.some(([x, y]) => Math.abs(x - offX) > 1 || Math.abs(y - offY) > 1)) {
+    throw new Error("Could not map the canvas");
+  }
+  debug?.({ stage: "calibrate", offX, offY, scale, samples: offs.length });
   const img = new Image();
   const url = URL.createObjectURL(new Blob([text], { type: "image/svg+xml;charset=utf-8" }));
   try {
@@ -194,7 +297,7 @@ async function rasterize(elements: any[], files: any): Promise<Raster> {
     g.fillRect(0, 0, canvas.width, canvas.height);
     g.drawImage(img, 0, 0, canvas.width, canvas.height);
     const px = g.getImageData(0, 0, canvas.width, canvas.height);
-    return { data: px.data, w: canvas.width, h: canvas.height, vbX, vbY, scale: canvas.width / vbW };
+    return { data: px.data, w: canvas.width, h: canvas.height, offX, offY, scale: canvas.width / vbW };
   } finally {
     URL.revokeObjectURL(url);
   }
@@ -206,12 +309,27 @@ const lum = (d: Uint8ClampedArray, i: number) => (d[i] + d[i + 1] + d[i + 2]) / 
  * Flood-fill the enclosed region around a scene point. Returns the boundary
  * polygon in scene coords, or null when the area isn't enclosed.
  */
-export async function floodRegion(elements: any[], files: any, click: Pt): Promise<Pt[] | null> {
-  const rast = await rasterize(elements, files);
-  const { data, w, h, vbX, vbY, scale } = rast;
-  const sx = Math.round((click.x - vbX) * scale);
-  const sy = Math.round((click.y - vbY) * scale);
-  if (sx < 0 || sy < 0 || sx >= w || sy >= h) return null;
+export async function floodRegion(
+  elements: any[],
+  files: any,
+  click: Pt,
+  debug?: (info: Record<string, unknown>) => void,
+): Promise<Pt[] | null> {
+  let rast: Raster;
+  try {
+    rast = await rasterize(elements, files, debug);
+  } catch (err) {
+    debug?.({ stage: "raster-error", message: err instanceof Error ? err.message : String(err) });
+    throw err;
+  }
+  const { data, w, h, offX, offY, scale } = rast;
+  const sx = Math.round((click.x + offX) * scale);
+  const sy = Math.round((click.y + offY) * scale);
+  debug?.({ stage: "raster", w, h, offX, offY, scale, clickPx: [sx, sy] });
+  if (sx < 0 || sy < 0 || sx >= w || sy >= h) {
+    debug?.({ stage: "bounds", verdict: "outside" });
+    return null;
+  }
 
   // Barriers = drawn pixels (anything clearly off-white), dilated 1px to
   // close hairline gaps in hand-drawn strokes.
@@ -235,6 +353,9 @@ export async function floodRegion(elements: any[], files: any, click: Pt): Promi
     }
   }
   if (dil[sy * w + sx]) return null; // clicked straight onto ink
+  let barrierCount = 0;
+  for (let i = 0; i < dil.length; i++) if (dil[i]) barrierCount++;
+  debug?.({ stage: "barriers", barrierCount });
 
   // 4-way flood. Caps are relative: tiny regions are fine, only
   // canvas-filling floods abort.
@@ -267,7 +388,11 @@ export async function floodRegion(elements: any[], files: any, click: Pt): Promi
       stack.push(cur + w);
     }
   }
-  if (touchedEdge || count < 64) return null;
+  if (touchedEdge || count < 64) {
+    debug?.({ stage: "flood", count, touchedEdge, verdict: "reject" });
+    return null;
+  }
+  debug?.({ stage: "flood", count, touchedEdge, verdict: "ok" });
 
   // Marching squares on the filled mask -> longest loop wins (islands get
   // painted over).
@@ -280,8 +405,12 @@ export async function floodRegion(elements: any[], files: any, click: Pt): Promi
     cArea2 += a.x * b.y - b.x * a.y;
   }
   const cArea = Math.abs(cArea2 / 2);
-  if (!(cArea > 0) || Math.abs(cArea - count) / count > 0.6) return null;
-  const scene = contour.map((p) => ({ x: vbX + p.x / scale, y: vbY + p.y / scale }));
+  if (!(cArea > 0) || Math.abs(cArea - count) / count > 0.6) {
+    debug?.({ stage: "trace", contourLen: contour.length, cArea, count, verdict: "reject" });
+    return null;
+  }
+  debug?.({ stage: "trace", contourLen: contour.length, cArea, count, verdict: "ok" });
+  const scene = contour.map((p) => ({ x: p.x / scale - offX, y: p.y / scale - offY }));
   const simple = rdp(scene, 1.5);
   return simple.length >= 3 ? simple : null;
 }
@@ -355,30 +484,45 @@ function traceContour(mask: Uint8Array, w: number, h: number): Pt[] {
     }
   }
   if (segs.length === 0) return [];
-  // Join segments into loops via shared endpoints (0.5-grid => exact keys).
+  // Join segments into CLOSED loops. Index BOTH endpoints: marching-squares
+  // segments have arbitrary orientation, so looking up only starts misses
+  // every continuation that points into the current vertex (the walk then
+  // dies mid-loop and yields a half contour).
   const key = (p: Pt) => `${p.x},${p.y}`;
-  const byStart = new Map<string, number[]>();
-  segs.forEach((s, i) => {
-    const k = key(s[0]);
-    const l = byStart.get(k);
+  const byPoint = new Map<string, number[]>();
+  const addIdx = (k: string, i: number) => {
+    const l = byPoint.get(k);
     if (l) l.push(i);
-    else byStart.set(k, [i]);
+    else byPoint.set(k, [i]);
+  };
+  segs.forEach((s, i) => {
+    addIdx(key(s[0]), i);
+    addIdx(key(s[1]), i);
   });
   const used = new Array<boolean>(segs.length).fill(false);
   let best: Pt[] = [];
   for (let i = 0; i < segs.length; i++) {
     if (used[i]) continue;
-    used[i] = true;
+    // Tentative walk: only committed when it closes back on its start.
+    // Unclosed walks are discarded WITHOUT consuming segments, so a later
+    // start can still complete the loop.
+    const local = new Set<number>([i]);
     const loop: Pt[] = [segs[i][0], segs[i][1]];
+    let closed = false;
     for (let guard = 0; guard < segs.length; guard++) {
       const end = loop[loop.length - 1];
-      if (key(end) === key(loop[0]) && loop.length > 4) break;
-      const cand = (byStart.get(key(end)) ?? []).find((j) => !used[j]);
+      if (key(end) === key(loop[0]) && loop.length > 4) {
+        closed = true;
+        break;
+      }
+      const cand = (byPoint.get(key(end)) ?? []).find((j) => !used[j] && !local.has(j));
       if (cand === undefined) break;
-      used[cand] = true;
+      local.add(cand);
       const s = segs[cand];
       loop.push(key(s[0]) === key(end) ? s[1] : s[0]);
     }
+    if (!closed) continue;
+    for (const j of local) used[j] = true;
     if (loop.length > best.length) best = loop;
   }
   return best;
