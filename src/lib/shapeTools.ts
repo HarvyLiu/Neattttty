@@ -157,24 +157,8 @@ export function recognizeStroke(abs: Pt[]): Recognized | null {
       ? corners.slice(0, -1)
       : corners;
 
-  if (verts.length === 3) return { kind: "triangle", box };
-  if (verts.length === 4) {
-    const angs = [0, 1, 2, 3].map((i) => angleAt(verts[i], verts[(i + 1) % 4], verts[(i + 2) % 4]));
-    const rightish = angs.filter((a) => a > 70 && a < 110).length;
-    // Diamond: vertices sit near edge midpoints (top/right/bottom/left).
-    const nx = verts.map((v) => (v.x - box.minX) / (w || 1));
-    const ny = verts.map((v) => (v.y - box.minY) / (h || 1));
-    const order = [...nx.keys()].sort((a, b) => ny[a] - ny[b]);
-    const diamondish =
-      Math.abs(nx[order[0]] - 0.5) < 0.22 &&
-      Math.abs(ny[order[0]]) < 0.22 &&
-      Math.abs(nx[order[3]] - 0.5) < 0.22 &&
-      Math.abs(ny[order[3]] - 1) < 0.22;
-    if (diamondish && rightish < 4) return { kind: "diamond", box };
-    if (rightish >= 3) return { kind: "rectangle", box };
-    return null;
-  }
-  // Round closed blob -> ellipse (needs circularity).
+  // Roundness first: hand circles often RDP to 9+ vertices, so a vertex-count
+  // gate here would reject exactly the strokes users draw most.
   let area2 = 0;
   for (let i = 0; i < pts.length; i++) {
     const a = pts[i];
@@ -182,7 +166,27 @@ export function recognizeStroke(abs: Pt[]): Recognized | null {
     area2 += a.x * b.y - b.x * a.y;
   }
   const circularity = (4 * Math.PI * Math.abs(area2 / 2)) / (L * L || 1);
-  if (verts.length <= 8 && circularity > 0.72) return { kind: "ellipse", box };
+  if (verts.length <= 16 && circularity > 0.78) return { kind: "ellipse", box };
+
+  if (verts.length === 3) return { kind: "triangle", box };
+  if (verts.length === 4) {
+    const angs = [0, 1, 2, 3].map((i) => angleAt(verts[i], verts[(i + 1) % 4], verts[(i + 2) % 4]));
+    const rightish = angs.filter((a) => a > 65 && a < 115).length;
+    // Diamond: vertices sit near edge midpoints (top/right/bottom/left).
+    const nx = verts.map((v) => (v.x - box.minX) / (w || 1));
+    const ny = verts.map((v) => (v.y - box.minY) / (h || 1));
+    const order = [...nx.keys()].sort((a, b) => ny[a] - ny[b]);
+    const diamondish =
+      Math.abs(nx[order[0]] - 0.5) < 0.25 &&
+      Math.abs(ny[order[0]]) < 0.25 &&
+      Math.abs(nx[order[3]] - 0.5) < 0.25 &&
+      Math.abs(ny[order[3]] - 1) < 0.25;
+    if (diamondish && rightish < 4) return { kind: "diamond", box };
+    if (rightish >= 3) return { kind: "rectangle", box };
+    return null;
+  }
+  // Small-corner-count blobs get a second chance at ellipse with looser bar.
+  if (verts.length <= 6 && circularity > 0.65) return { kind: "ellipse", box };
   return null;
 }
 
@@ -269,11 +273,15 @@ async function rasterize(elements: any[], files: any): Promise<Raster> {
     files: files ?? {},
   } as any);
   const text = new XMLSerializer().serializeToString(svg);
-  const vb = text.match(/viewBox="([\d.\-eE+ ]+)"/);
+  const vb = text.match(/viewBox="([^"]+)"/);
   const wm = text.match(/<svg[^>]*\bwidth="([\d.]+)"/);
   if (!vb || !wm) throw new Error("Could not rasterize the scene");
-  const [vbX, vbY, vbW, vbH] = vb[1].trim().split(/\s+/).map(Number);
+  const nums = vb[1].trim().split(/[\s,]+/).map(Number);
+  if (nums.length < 4 || nums.some((n) => !isFinite(n))) throw new Error("Could not rasterize the scene");
+  const [vbX, vbY, vbW, vbH] = nums;
+  if (!(vbW > 0) || !(vbH > 0)) throw new Error("Could not rasterize the scene");
   const cw = Number(wm[1]);
+  if (!(cw > 0)) throw new Error("Could not rasterize the scene");
   const img = new Image();
   const url = URL.createObjectURL(new Blob([text], { type: "image/svg+xml;charset=utf-8" }));
   try {
@@ -372,6 +380,16 @@ export async function floodRegion(
   // Marching squares on the filled mask -> contour (pixel coords).
   const contour = traceContour(seen, w, h);
   if (contour.length < 8) return null;
+  // Sanity: traced area must roughly match the filled pixel count, else the
+  // trace went astray (self-intersections, runaway loop) — abort loudly.
+  let cArea2 = 0;
+  for (let i = 0; i < contour.length; i++) {
+    const a = contour[i];
+    const b = contour[(i + 1) % contour.length];
+    cArea2 += a.x * b.y - b.x * a.y;
+  }
+  const cArea = Math.abs(cArea2 / 2);
+  if (!(cArea > 0) || Math.abs(cArea - count) / count > 0.6) return null;
   const scene = contour.map((p) => ({ x: vbX + p.x / scale, y: vbY + p.y / scale }));
   const simple = rdp(scene, 1.5);
   return simple.length >= 3 ? simple : null;

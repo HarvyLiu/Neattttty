@@ -27,7 +27,6 @@ import {
   Sparkles,
   Trash2,
   X,
-  Zap,
 } from "lucide-react";
 import "./styles.css";
 import {
@@ -291,7 +290,7 @@ export default function App() {
       } catch {
         /* ignore */
       }
-      showToast(on ? "Draw to shape on — strokes become clean shapes" : "Draw to shape off");
+      showToast(on ? "Draw to shape on — sketch with the draw tool (P)" : "Draw to shape off");
     },
     [showToast],
   );
@@ -589,6 +588,17 @@ export default function App() {
     showToast("Moved to trash (30-day restore)");
   };
 
+  /** Schedule a draw-to-shape pass (debounced; latest call wins). */
+  const scheduleConvert = useCallback(
+    (ms: number) => {
+      if (strokeTimer.current) window.clearTimeout(strokeTimer.current);
+      strokeTimer.current = window.setTimeout(() => void convertPendingStrokes(), ms);
+    },
+    // convertPendingStrokes is stable (empty deps) — safe to omit here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
   const handleChange = useCallback((elements: any, appState: any, files: any) => {
     const id = activeIdRef.current;
     const els: any[] = elements ?? [];
@@ -625,12 +635,9 @@ export default function App() {
           }
         }
       }
-      if (fresh) {
-        if (strokeTimer.current) window.clearTimeout(strokeTimer.current);
-        strokeTimer.current = window.setTimeout(() => void convertPendingStrokes(), 700);
-      }
+      if (fresh) scheduleConvert(700);
     }
-  }, [syncTool]);
+  }, [syncTool, scheduleConvert]);
 
   // Constant-brush option: flatten previously committed pressure strokes.
   // Runs at pointer-down (and when the option is switched on). Never touches
@@ -692,22 +699,10 @@ export default function App() {
     }
   }, []);
 
-  /** Bucket fill: click an enclosed area -> insert a filled region (one undo step). */
-  const handleBucketPointerDown = useCallback(
-    async (ev: any) => {
-      flushConstantBrush();
-      if (!bucketRef.current || presenting) return;
-      if (ev?.button !== 0 || ev?.ctrlKey || ev?.metaKey) return;
-      const target = ev?.target as HTMLElement | null;
-      if (!target || typeof (target as any).closest !== "function" || (target as any).closest("canvas") == null) return;
-      const host = ev?.currentTarget as HTMLElement | null;
-      const rect = host?.getBoundingClientRect?.();
+  /** Bucket fill: canvas press with the tool armed -> flood the enclosed area. */
+  const runBucketFill = useCallback(
+    async (sx: number, sy: number) => {
       const api = apiRef.current;
-      const st = api?.getAppState?.() ?? {};
-      if (!rect) return;
-      const z = typeof st?.zoom === "number" ? st.zoom : (st?.zoom?.value ?? 1) || 1;
-      const sx = (ev.clientX - rect.left) / z - (st?.scrollX ?? 0);
-      const sy = (ev.clientY - rect.top) / z - (st?.scrollY ?? 0);
       const els: any[] = (api?.getSceneElements?.() ?? []).filter((e: any) => !e?.isDeleted);
       const files = active?.data.files ?? {};
       let poly: { x: number; y: number }[] | null = null;
@@ -772,8 +767,31 @@ export default function App() {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [active, presenting, showToast],
+    [active, showToast],
   );
+
+  /** Canvas pointer-down, straight from the editor: (activeTool, pointerDownState). */
+  const handleEditorPointerDown = useCallback(
+    (tool: any, state: any) => {
+      flushConstantBrush();
+      // A new press means any in-flight stroke is over: convert it now.
+      if (pendingStrokeRef.current.size > 0 && drawShapeRef.current) scheduleConvert(250);
+      if (!bucketRef.current || presenting) return;
+      const t = String(tool?.type ?? "");
+      if (t !== "selection" && t !== "freedraw" && t !== "eraser") return;
+      if (state?.withCmdOrCtrl) return;
+      const ox = state?.origin?.x;
+      const oy = state?.origin?.y;
+      if (typeof ox !== "number" || typeof oy !== "number") return;
+      void runBucketFill(ox, oy);
+    },
+    [presenting, runBucketFill, scheduleConvert],
+  );
+
+  /** Stroke ended: convert queued draw-to-shape strokes promptly. */
+  const handleEditorPointerUp = useCallback(() => {
+    if (pendingStrokeRef.current.size > 0 && drawShapeRef.current) scheduleConvert(300);
+  }, [scheduleConvert]);
 
   const flushConstantBrush = useCallback(() => {
     if (!constantBrushRef.current) return;
@@ -1335,7 +1353,31 @@ export default function App() {
                 }}
                 onChange={handleChange}
                 onLibraryChange={handleLibraryChange}
-                onPointerDown={(e) => void handleBucketPointerDown(e)}
+                onPointerDown={handleEditorPointerDown}
+                onPointerUp={handleEditorPointerUp}
+                renderTopRightUI={(isMobile) => {
+                  if (isMobile) return null;
+                  return (
+                    <>
+                      <button
+                        className={`tbtn${drawShapeOn ? " on" : ""}`}
+                        onClick={() => setDrawShape(!drawShapeRef.current)}
+                        title="Draw to shape: strokes become clean shapes (Shift+X)"
+                        aria-pressed={drawShapeOn}
+                      >
+                        <Shapes size={16} />
+                      </button>
+                      <button
+                        className={`tbtn${bucketOn ? " on" : ""}`}
+                        onClick={() => setBucket(!bucketRef.current)}
+                        title="Bucket fill: click an enclosed area (B cycles color, Esc stops)"
+                        aria-pressed={bucketOn}
+                      >
+                        <PaintBucket size={16} />
+                      </button>
+                    </>
+                  );
+                }}
                 theme={flavor === "latte" ? "light" : "dark"}
                 name={`Neattttty — ${active.name}`}
                 excalidrawAPI={(api: any) => {
@@ -1361,36 +1403,6 @@ export default function App() {
                     }
                   >
                     Export PPTX
-                  </MainMenu.Item>
-                  <MainMenu.Separator />
-                  <MainMenu.Item
-                    icon={<Shapes size={15} />}
-                    shortcut="Shift+X"
-                    selected={drawShapeOn}
-                    onSelect={() => setDrawShape(!drawShapeRef.current)}
-                  >
-                    Draw to shape
-                  </MainMenu.Item>
-                  <MainMenu.Item
-                    icon={<Zap size={15} />}
-                    shortcut="K"
-                    onSelect={() => {
-                      try {
-                        apiRef.current?.setActiveTool?.({ type: "laser" });
-                      } catch {
-                        /* ignore */
-                      }
-                    }}
-                  >
-                    Laser pointer
-                  </MainMenu.Item>
-                  <MainMenu.Item
-                    icon={<PaintBucket size={15} />}
-                    shortcut="B"
-                    selected={bucketOn}
-                    onSelect={() => setBucket(!bucketRef.current)}
-                  >
-                    Bucket fill
                   </MainMenu.Item>
                   <MainMenu.Separator />
                   <MainMenu.DefaultItems.ClearCanvas />

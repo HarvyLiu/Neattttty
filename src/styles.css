@@ -92,6 +92,11 @@ html[data-flavor="latte"] .saved{color:var(--green-deep)}
 .ctx-item:disabled{opacity:.45;cursor:default}
 .ctx-item.danger{color:var(--red)}
 .ctx-item svg{flex:none;color:var(--subtext0)}
+
+/* Shape-tool buttons in the editor's top-right cluster */
+.tbtn{background:transparent;border:1px solid transparent;color:inherit;border-radius:8px;width:36px;height:36px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer}
+.tbtn:hover{background:color-mix(in srgb,currentColor 10%,transparent)}
+.tbtn.on{background:var(--green);border-color:var(--green);color:#11111B}
 .trash-box{margin-top:auto;background:color-mix(in srgb,var(--yellow) 12%,transparent);border:1px dashed var(--yellow);border-radius:10px;padding:9px 10px;font-size:12px}
 
 .canvas-zone{position:relative;flex:1;min-width:0;background:var(--canvas)}
