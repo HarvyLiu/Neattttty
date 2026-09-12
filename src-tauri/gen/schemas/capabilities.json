@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Neattttty default capability (core only; scenes persist via localStorage + file export in v1)","local":true,"windows":["main"],"permissions":["core:default"]}}
+{"default":{"identifier":"default","description":"Neattttty default capability (core only; scenes persist via localStorage + file export in v1)","local":true,"windows":["main"],"permissions":["core:default","opener:allow-open-url"]}}
