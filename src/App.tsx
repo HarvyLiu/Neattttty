@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Excalidraw, MainMenu } from "@excalidraw/excalidraw";
+import { Excalidraw, MainMenu, restoreElements } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import {
   Bot,
@@ -14,6 +14,7 @@ import {
   FolderPlus,
   LayoutDashboard,
   Menu,
+  PaintBucket,
   PanelLeft,
   Pencil,
   Play,
@@ -21,10 +22,12 @@ import {
   Presentation,
   Save,
   SendHorizontal,
+  Shapes,
   SlidersHorizontal,
   Sparkles,
   Trash2,
   X,
+  Zap,
 } from "lucide-react";
 import "./styles.css";
 import {
@@ -51,6 +54,15 @@ import {
   type Collection,
 } from "./lib/collections";
 import ContextMenu, { type CtxItem } from "./components/ContextMenu";
+import {
+  BUCKET_COLORS,
+  BUCKET_KEY,
+  DRAW_SHAPE_KEY,
+  absolutePoints,
+  floodRegion,
+  recognizeStroke,
+  shapeToPartial,
+} from "./lib/shapeTools";
 import {
   copyText,
   loadLibraryStore,
@@ -208,6 +220,22 @@ export default function App() {
       return false;
     }
   });
+  /** Draw-to-shape: finished freedraw strokes auto-become clean shapes. */
+  const [drawShapeOn, setDrawShapeOn] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(DRAW_SHAPE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  /** Bucket fill armed: canvas clicks flood-fill the enclosed area. */
+  const [bucketOn, setBucketOn] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(BUCKET_KEY) === "armed";
+    } catch {
+      return false;
+    }
+  });
 
   const apiRef = useRef<any>(null);
   const activeIdRef = useRef(activeId);
@@ -218,8 +246,16 @@ export default function App() {
   const sceneSigRef = useRef<Record<string, string>>({});
   /** Pressure strokes already flattened to constant — never touch again. */
   const flattenedRef = useRef<Set<string>>(new Set());
+  /** Freedraw strokes already seen (draw-to-shape only converts new ones). */
+  const seenStrokeRef = useRef<Set<string>>(new Set());
+  const pendingStrokeRef = useRef<Set<string>>(new Set());
+  const strokeTimer = useRef<number | null>(null);
+  const drawShapeRef = useRef(drawShapeOn);
+  const bucketRef = useRef(bucketOn);
   const constantBrushRef = useRef(constantBrush);
   constantBrushRef.current = constantBrush;
+  drawShapeRef.current = drawShapeOn;
+  bucketRef.current = bucketOn;
 
   const active = scenes.find((s) => s.id === activeId) ?? scenes[0];
   const activeIdSafe = active?.id ?? "";
@@ -246,6 +282,51 @@ export default function App() {
     },
     [showToast],
   );
+
+  const setDrawShape = useCallback(
+    (on: boolean) => {
+      setDrawShapeOn(on);
+      try {
+        localStorage.setItem(DRAW_SHAPE_KEY, on ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+      showToast(on ? "Draw to shape on — strokes become clean shapes" : "Draw to shape off");
+    },
+    [showToast],
+  );
+
+  const setBucket = useCallback(
+    (on: boolean) => {
+      setBucketOn(on);
+      try {
+        localStorage.setItem(BUCKET_KEY, on ? "armed" : "");
+      } catch {
+        /* ignore */
+      }
+      showToast(on ? "Bucket armed — click an enclosed area (B cycles color, Esc stops)" : "Bucket off");
+    },
+    [showToast],
+  );
+
+  /** Cycle the shared fill color (used by the bucket); returns the new color. */
+  const cycleBucketColor = useCallback(() => {
+    const api = apiRef.current;
+    let cur = "#12b886";
+    try {
+      cur = String(api?.getAppState?.()?.currentItemBackgroundColor ?? cur);
+    } catch {
+      /* ignore */
+    }
+    const i = BUCKET_COLORS.findIndex((c) => c.toLowerCase() === cur.toLowerCase());
+    const next = BUCKET_COLORS[(i + 1) % BUCKET_COLORS.length];
+    try {
+      api?.updateScene?.({ appState: { currentItemBackgroundColor: next } });
+    } catch {
+      /* ignore */
+    }
+    showToast(`Bucket color ${next}`);
+  }, [showToast]);
 
   const [activeTool, setActiveTool] = useState<string>("selection");
   const activeToolRef = useRef("selection");
@@ -531,6 +612,24 @@ export default function App() {
           : s,
       ),
     );
+    // Draw-to-shape: queue new freedraw strokes; convert after a quiet spell.
+    if (drawShapeRef.current) {
+      const seen = seenStrokeRef.current;
+      let fresh = false;
+      for (const e of els) {
+        if (e?.type === "freedraw" && typeof e.id === "string" && !seen.has(e.id)) {
+          seen.add(e.id);
+          if ((e.points?.length ?? 0) >= 6 && !e.isDeleted) {
+            pendingStrokeRef.current.add(e.id);
+            fresh = true;
+          }
+        }
+      }
+      if (fresh) {
+        if (strokeTimer.current) window.clearTimeout(strokeTimer.current);
+        strokeTimer.current = window.setTimeout(() => void convertPendingStrokes(), 700);
+      }
+    }
   }, [syncTool]);
 
   // Constant-brush option: flatten previously committed pressure strokes.
@@ -539,6 +638,143 @@ export default function App() {
   // point, and only strokes with 2+ points are eligible. Strokes the user
   // retouches in the canvas Pressure panel afterwards are recorded as
   // flattened and left alone.
+  /** Convert queued freedraw strokes to clean shapes (single undo step). */
+  const convertPendingStrokes = useCallback(async () => {
+    const ids = [...pendingStrokeRef.current];
+    pendingStrokeRef.current.clear();
+    if (ids.length === 0 || !drawShapeRef.current) return;
+    const api = apiRef.current;
+    const els: any[] = api?.getSceneElements?.() ?? [];
+    let style = {
+      strokeColor: "#1e1e1e",
+      backgroundColor: "transparent",
+      fillStyle: "solid",
+      strokeWidth: 2,
+      roughness: 1,
+    };
+    try {
+      const st = api?.getAppState?.();
+      style = {
+        strokeColor: st?.currentItemStrokeColor ?? style.strokeColor,
+        backgroundColor: st?.currentItemBackgroundColor ?? style.backgroundColor,
+        fillStyle: st?.currentItemFillStyle ?? style.fillStyle,
+        strokeWidth: st?.currentItemStrokeWidth ?? style.strokeWidth,
+        roughness: st?.currentItemRoughness ?? style.roughness,
+      };
+    } catch {
+      /* ignore */
+    }
+    const byId = new Map<string, any>(els.map((e: any) => [e?.id, e]));
+    const next = [...els];
+    let changed = false;
+    for (const id of ids) {
+      const e = byId.get(id);
+      if (!e || e.type !== "freedraw" || e.isDeleted) continue;
+      const rec = recognizeStroke(absolutePoints(e));
+      if (!rec) continue;
+      const partial = shapeToPartial(rec.kind, rec.box, style);
+      const idx = next.findIndex((x: any) => x?.id === id);
+      if (idx < 0) continue;
+      try {
+        const [fixed] = restoreElements([{ ...partial, id, version: (e.version ?? 0) + 1 }] as any, null) as any[];
+        if (!fixed) continue;
+        next[idx] = fixed;
+        changed = true;
+      } catch {
+        /* keep the original stroke */
+      }
+    }
+    if (!changed) return;
+    try {
+      api?.updateScene?.({ elements: next });
+    } catch {
+      /* ignore — strokes stay as drawn */
+    }
+  }, []);
+
+  /** Bucket fill: click an enclosed area -> insert a filled region (one undo step). */
+  const handleBucketPointerDown = useCallback(
+    async (ev: any) => {
+      flushConstantBrush();
+      if (!bucketRef.current || presenting) return;
+      if (ev?.button !== 0 || ev?.ctrlKey || ev?.metaKey) return;
+      const target = ev?.target as HTMLElement | null;
+      if (!target || typeof (target as any).closest !== "function" || (target as any).closest("canvas") == null) return;
+      const host = ev?.currentTarget as HTMLElement | null;
+      const rect = host?.getBoundingClientRect?.();
+      const api = apiRef.current;
+      const st = api?.getAppState?.() ?? {};
+      if (!rect) return;
+      const z = typeof st?.zoom === "number" ? st.zoom : (st?.zoom?.value ?? 1) || 1;
+      const sx = (ev.clientX - rect.left) / z - (st?.scrollX ?? 0);
+      const sy = (ev.clientY - rect.top) / z - (st?.scrollY ?? 0);
+      const els: any[] = (api?.getSceneElements?.() ?? []).filter((e: any) => !e?.isDeleted);
+      const files = active?.data.files ?? {};
+      let poly: { x: number; y: number }[] | null = null;
+      try {
+        poly = await floodRegion(els, files, { x: sx, y: sy });
+      } catch {
+        poly = null;
+      }
+      if (!poly) {
+        showToast("No enclosed area there — close the gap and try again");
+        return;
+      }
+      let color = "#12b886";
+      try {
+        const c = String(api?.getAppState?.()?.currentItemBackgroundColor ?? "");
+        if (c && c.toLowerCase() !== "transparent") color = c;
+      } catch {
+        /* ignore */
+      }
+      const xs = poly.map((p) => p.x);
+      const ys = poly.map((p) => p.y);
+      const minX = Math.min(...xs);
+      const minY = Math.min(...ys);
+      try {
+        const [fixed] = restoreElements(
+          [
+            {
+              id: uid(),
+              type: "freedraw",
+              x: minX,
+              y: minY,
+              points: poly.map((p) => [p.x - minX, p.y - minY]),
+              simulatePressure: false,
+              strokeColor: color,
+              backgroundColor: color,
+              fillStyle: "solid",
+              strokeWidth: 2,
+              roughness: 0,
+              opacity: 100,
+            } as any,
+          ],
+          null,
+        ) as any[];
+        if (!fixed) return;
+        const cur: any[] = api?.getSceneElements?.() ?? [];
+        // Absorb the accidental dot stroke this click also started.
+        const next = cur.filter(
+          (el: any) =>
+            !(
+              el?.type === "freedraw" &&
+              (el.points?.length ?? 0) < 3 &&
+              typeof el?.x === "number" &&
+              typeof el?.y === "number" &&
+              Math.abs(el.x - sx) < 40 &&
+              Math.abs(el.y - sy) < 40
+            ),
+        );
+        next.push(fixed);
+        api?.updateScene?.({ elements: next });
+      } catch {
+        /* ignore */
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [active, presenting, showToast],
+  );
+
   const flushConstantBrush = useCallback(() => {
     if (!constantBrushRef.current) return;
     const api = apiRef.current;
@@ -582,6 +818,14 @@ export default function App() {
         s.data.appState?.viewBackgroundColor,
       );
       flattenedRef.current = new Set();
+      seenStrokeRef.current = new Set(
+        (s.data.elements ?? []).filter((e: any) => e?.type === "freedraw" && e?.id).map((e: any) => e.id),
+      );
+      pendingStrokeRef.current.clear();
+      if (strokeTimer.current) {
+        window.clearTimeout(strokeTimer.current);
+        strokeTimer.current = null;
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeIdSafe]);
@@ -839,6 +1083,39 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [presenting, presentIdx, frames, activeIdSafe]);
 
+  // Shape-tool shortcuts: B arms/cycles bucket, Shift+X toggles draw-to-shape,
+  // Esc disarms. Skipped while typing, editing text, presenting, or in dialogs.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (aiOpen || dashOpen || aiSettingsOpen || helpOpen || menuOpen || presenting) {
+        if (e.key === "Escape" && bucketRef.current) setBucket(false);
+        return;
+      }
+      if (e.key === "Escape") {
+        if (bucketRef.current) setBucket(false);
+        return;
+      }
+      try {
+        if (apiRef.current?.getAppState?.()?.editingElement) return;
+      } catch {
+        /* ignore */
+      }
+      if (e.key === "b" || e.key === "B") {
+        e.preventDefault();
+        if (bucketRef.current) cycleBucketColor();
+        else setBucket(true);
+      } else if (e.shiftKey && (e.key === "x" || e.key === "X")) {
+        e.preventDefault();
+        setDrawShape(!drawShapeRef.current);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [aiOpen, dashOpen, aiSettingsOpen, helpOpen, menuOpen, presenting, setBucket, setDrawShape, cycleBucketColor]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
@@ -1058,7 +1335,7 @@ export default function App() {
                 }}
                 onChange={handleChange}
                 onLibraryChange={handleLibraryChange}
-                onPointerDown={() => flushConstantBrush()}
+                onPointerDown={(e) => void handleBucketPointerDown(e)}
                 theme={flavor === "latte" ? "light" : "dark"}
                 name={`Neattttty — ${active.name}`}
                 excalidrawAPI={(api: any) => {
@@ -1084,6 +1361,36 @@ export default function App() {
                     }
                   >
                     Export PPTX
+                  </MainMenu.Item>
+                  <MainMenu.Separator />
+                  <MainMenu.Item
+                    icon={<Shapes size={15} />}
+                    shortcut="Shift+X"
+                    selected={drawShapeOn}
+                    onSelect={() => setDrawShape(!drawShapeRef.current)}
+                  >
+                    Draw to shape
+                  </MainMenu.Item>
+                  <MainMenu.Item
+                    icon={<Zap size={15} />}
+                    shortcut="K"
+                    onSelect={() => {
+                      try {
+                        apiRef.current?.setActiveTool?.({ type: "laser" });
+                      } catch {
+                        /* ignore */
+                      }
+                    }}
+                  >
+                    Laser pointer
+                  </MainMenu.Item>
+                  <MainMenu.Item
+                    icon={<PaintBucket size={15} />}
+                    shortcut="B"
+                    selected={bucketOn}
+                    onSelect={() => setBucket(!bucketRef.current)}
+                  >
+                    Bucket fill
                   </MainMenu.Item>
                   <MainMenu.Separator />
                   <MainMenu.DefaultItems.ClearCanvas />
