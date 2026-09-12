@@ -81,14 +81,25 @@ function New-IconTile([int]$size) {
   return $bmp
 }
 
+function Save-RgbaPng($bmp, [string]$path) {
+  # Tauri's generate_context!() rejects non-RGBA icons at compile time,
+  # and GDI+ sometimes saves opaque-looking tiles as RGB (color type 2).
+  $rect = New-Object System.Drawing.Rectangle(0, 0, $bmp.Width, $bmp.Height)
+  $argb = $bmp.Clone($rect, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+  $argb.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+  $argb.Dispose()
+  $bytes = [System.IO.File]::ReadAllBytes($path)
+  if ($bytes[25] -ne 6) { throw "Saved $path without alpha (color type $($bytes[25]))" }
+}
+
 foreach ($s in @(512, 256, 128, 64, 48, 32, 24, 16)) {
   $b = New-IconTile $s
-  if ($s -eq 512) { $b.Save((Join-Path $iconsDir "icon.png"), [System.Drawing.Imaging.ImageFormat]::Png) }
-  elseif ($s -eq 128) { $b.Save((Join-Path $iconsDir "128x128.png"), [System.Drawing.Imaging.ImageFormat]::Png) }
-  elseif ($s -eq 32) { $b.Save((Join-Path $iconsDir "32x32.png"), [System.Drawing.Imaging.ImageFormat]::Png) }
+  if ($s -eq 512) { Save-RgbaPng $b (Join-Path $iconsDir "icon.png") }
+  elseif ($s -eq 128) { Save-RgbaPng $b (Join-Path $iconsDir "128x128.png") }
+  elseif ($s -eq 32) { Save-RgbaPng $b (Join-Path $iconsDir "32x32.png") }
   $sizesDir = Join-Path $iconsDir "sizes"
   if (-not (Test-Path -LiteralPath $sizesDir)) { New-Item -ItemType Directory -Path $sizesDir | Out-Null }
-  $b.Save((Join-Path $sizesDir ("icon-{0}.png" -f $s)), [System.Drawing.Imaging.ImageFormat]::Png)
+  Save-RgbaPng $b (Join-Path $sizesDir ("icon-{0}.png" -f $s))
   $b.Dispose()
 }
 
