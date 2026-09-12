@@ -61,6 +61,8 @@ import {
   LIBRARIES_SITE,
   PERSONAL_ID,
   addLibraryItems,
+  addPersonalItem,
+  cloneElementsFresh,
   importLibraryFile,
   importLibraryFromUrl,
   loadLibraryStore,
@@ -192,7 +194,9 @@ export default function App() {
     return FLAVORS.includes(f as Flavor) ? (f as Flavor) : "mocha";
   });
   const [railOpen, setRailOpen] = useState(true);
-  const [dockTab, setDockTab] = useState<"scenes" | "slides">("slides");
+  const [dockTab, setDockTab] = useState<"slides" | "scenes" | "library">("slides");
+  const [selectedCount, setSelectedCount] = useState(0);
+  const [libThumbs, setLibThumbs] = useState<Record<string, string>>({});
   const [menuOpen, setMenuOpen] = useState(false);
   const [dashOpen, setDashOpen] = useState(false);
   const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
@@ -279,12 +283,16 @@ export default function App() {
     }
   }, []);
 
-  // Freedraw tool detection: best-effort from onChange, plus a light poll
-  // for tool switches onChange doesn't report. Read-only, never writes.
+  // Freedraw tool detection + selection count: best-effort polls for state
+  // onChange doesn't report. Read-only, never writes.
   useEffect(() => {
     const timer = window.setInterval(() => {
       try {
-        syncTool(apiRef.current?.getAppState?.()?.activeTool?.type);
+        const appState = apiRef.current?.getAppState?.();
+        syncTool(appState?.activeTool?.type);
+        const sel = appState?.selectedElementIds ?? {};
+        const n = Object.keys(sel).length;
+        setSelectedCount((prev) => (prev === n ? prev : n));
       } catch {
         /* editor not ready */
       }
@@ -445,6 +453,60 @@ export default function App() {
     } catch (err: any) {
       showToast(err?.message ?? String(err));
     }
+  };
+
+  /** One-click stamp: clone a library item with fresh ids, place right of work. */
+  const insertLibraryItem = (itemId: string) => {
+    const item = libStore.items.find((i) => i?.id === itemId);
+    if (!item?.elements?.length) {
+      showToast("That library item is empty");
+      return;
+    }
+    const fresh = cloneElementsFresh(item.elements);
+    const cur: any[] = apiRef.current?.getSceneElements?.() ?? active?.data.elements ?? [];
+    let maxX = -Infinity;
+    for (const e of cur) {
+      if (typeof e?.x === "number" && typeof e?.width === "number") maxX = Math.max(maxX, e.x + e.width);
+    }
+    const shifted = shiftScene(fresh, isFinite(maxX) ? maxX + 120 : 120);
+    try {
+      apiRef.current?.updateScene?.({ elements: [...cur, ...shifted] });
+    } catch (err: any) {
+      showToast(String(err?.message ?? err));
+      return;
+    }
+    try {
+      apiRef.current?.scrollToContent?.(shifted, { fitToContent: true });
+    } catch {
+      /* older API — ignore */
+    }
+    showToast(`Stamped ${shifted.length} element(s) — drag anywhere`);
+  };
+
+  /** Save the current canvas selection as a Personal library item. */
+  const addSelectionToLibrary = () => {
+    const api = apiRef.current;
+    const els: any[] = api?.getSceneElements?.() ?? [];
+    let ids: Record<string, boolean> = {};
+    try {
+      ids = api?.getAppState?.()?.selectedElementIds ?? {};
+    } catch {
+      /* ignore */
+    }
+    const sel = els.filter((e) => ids[e?.id] && !e?.isDeleted);
+    if (sel.length === 0) {
+      showToast("Select elements on the canvas first");
+      return;
+    }
+    const next = addPersonalItem(libStore, sel);
+    libSigRef.current = sigLibrary(next.items);
+    setLibStore(next);
+    try {
+      api?.updateLibrary?.({ libraryItems: next.items });
+    } catch {
+      /* store is truth; the editor hydrates on next mount */
+    }
+    showToast(`Saved ${sel.length} element(s) to Personal library`);
   };
 
   /** Parse files into scenes inside a folder. Skips unreadable files with a summary. */
@@ -674,6 +736,30 @@ export default function App() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeIdSafe]);
+
+  // Library thumbnails: render each item's elements to SVG once, cache by id.
+  useEffect(() => {
+    const missing = libStore.items.filter((it) => it?.id && !libThumbs[it.id]);
+    if (missing.length === 0) return;
+    let cancelled = false;
+    void (async () => {
+      const entries: Record<string, string> = {};
+      for (const it of missing.slice(0, 60)) {
+        try {
+          entries[it.id] = await svgForElements(it.elements ?? [], {});
+        } catch {
+          /* leave blank */
+        }
+        if (cancelled) return;
+      }
+      if (!cancelled && Object.keys(entries).length > 0) {
+        setLibThumbs((prev) => ({ ...prev, ...entries }));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [libStore, libThumbs]);
 
   const stamp = () => new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
@@ -1170,6 +1256,9 @@ export default function App() {
               <button className={dockTab === "scenes" ? "on" : ""} onClick={() => setDockTab("scenes")}>
                 Scenes
               </button>
+              <button className={dockTab === "library" ? "on" : ""} onClick={() => setDockTab("library")}>
+                Library{libStore.items.length > 0 ? ` (${libStore.items.length})` : ""}
+              </button>
             </div>
             {dockTab === "slides" ? (
               <>
@@ -1230,7 +1319,7 @@ export default function App() {
                   </button>
                 </div>
               </>
-            ) : (
+            ) : dockTab === "scenes" ? (
               <>
                 <div className="list">
                   {scenes.slice(0, 6).map((s) => (
@@ -1245,6 +1334,48 @@ export default function App() {
                 <div className="dock-foot">
                   <button className="btn" style={{ flex: 1 }} onClick={() => setDashOpen(true)}>
                     Open dashboard
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="lib-hint">
+                  Click an item to stamp it right of your work. Select canvas elements →{" "}
+                  <b>Add selection</b> saves them to Personal.
+                </div>
+                <div className="lib-grid">
+                  {libStore.items.map((it) => (
+                    <button
+                      key={it.id}
+                      className="lib-cell"
+                      title={`Stamp ${(it.elements ?? []).length} element(s)`}
+                      onClick={() => insertLibraryItem(it.id)}
+                    >
+                      {libThumbs[it.id] ? (
+                        <span style={{ width: "100%" }} dangerouslySetInnerHTML={{ __html: libThumbs[it.id] }} />
+                      ) : (
+                        <span className="mono" style={{ fontSize: 10, color: "#888" }}>
+                          {(it.elements ?? []).length} els
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                  {libStore.items.length === 0 && (
+                    <div className="lib-hint">Empty — import a pack via ☰ → Libraries…</div>
+                  )}
+                </div>
+                <div className="dock-foot">
+                  <button
+                    className="btn"
+                    style={{ flex: 1 }}
+                    disabled={selectedCount === 0}
+                    onClick={addSelectionToLibrary}
+                    title={selectedCount === 0 ? "Select elements on the canvas first" : "Save selection to Personal library"}
+                  >
+                    <Plus size={14} /> Add selection{selectedCount > 0 ? ` (${selectedCount})` : ""}
+                  </button>
+                  <button className="btn" style={{ flex: 1 }} onClick={() => setLibOpen(true)}>
+                    Manage…
                   </button>
                 </div>
               </>

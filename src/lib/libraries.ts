@@ -113,6 +113,50 @@ export function addLibraryItems(
   return { items: [...store.items, ...withIds], sources: [...store.sources, src] };
 }
 
+/**
+ * Deep-clone elements with fresh ids so a library item can be stamped onto
+ * the canvas repeatedly without id collisions. Internal references
+ * (container, frame, bindings) are remapped; groupIds are kept so the
+ * stamped group stays grouped.
+ */
+export function cloneElementsFresh(elements: any[]): any[] {
+  const idMap = new Map<string, string>();
+  const freshId = (old: unknown) => {
+    const k = String(old ?? "");
+    if (!k) return k;
+    let v = idMap.get(k);
+    if (!v) {
+      v = uid();
+      idMap.set(k, v);
+    }
+    return v;
+  };
+  return (elements ?? []).map((e: any) => {
+    const c: any = JSON.parse(JSON.stringify(e ?? {}));
+    c.id = freshId(e?.id) || uid();
+    if (e?.containerId != null) c.containerId = freshId(e.containerId);
+    if (e?.frameId != null) c.frameId = freshId(e.frameId);
+    if (Array.isArray(e?.boundElements)) {
+      c.boundElements = e.boundElements.map((b: any) => ({ ...b, id: freshId(b?.id) }));
+    }
+    if (e?.startBinding) c.startBinding = { ...e.startBinding, elementId: freshId(e.startBinding.elementId) };
+    if (e?.endBinding) c.endBinding = { ...e.endBinding, elementId: freshId(e.endBinding.elementId) };
+    if (e?.start && typeof e.start === "object" && e.start?.id) c.start = { ...e.start, id: freshId(e.start.id) };
+    if (e?.end && typeof e.end === "object" && e.end?.id) c.end = { ...e.end, id: freshId(e.end.id) };
+    return c;
+  });
+}
+
+/** Save canvas-selected elements as a Personal library item. */
+export function addPersonalItem(store: LibraryStore, elements: any[]): LibraryStore {
+  const snap = JSON.parse(JSON.stringify(elements ?? []));
+  const item = { id: uid(), status: "unpublished", created: Date.now(), elements: snap };
+  const sources = withPersonal(store).sources.map((s) =>
+    s.id === PERSONAL_ID ? { ...s, itemIds: [...s.itemIds, item.id] } : s,
+  );
+  return { items: [...store.items, item], sources };
+}
+
 export function removeLibrarySource(store: LibraryStore, id: string): LibraryStore {
   if (id === PERSONAL_ID) return store;
   const src = store.sources.find((s) => s.id === id);
