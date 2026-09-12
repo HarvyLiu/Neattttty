@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { Excalidraw } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import {
@@ -16,6 +16,7 @@ import {
   LayoutDashboard,
   Menu,
   PanelLeft,
+  Pencil,
   Play,
   Plus,
   Presentation,
@@ -44,6 +45,14 @@ import {
   type SceneMeta,
   type TrashedScene,
 } from "./lib/scenes";
+import {
+  initCollections,
+  loadCollapsed,
+  migrateSceneFolders,
+  saveCollapsed,
+  saveCollections,
+  type Collection,
+} from "./lib/collections";
 import { AI_DEFAULTS, generateMermaid, mermaidToScene, shiftScene, type AIConfig, type AIKind, type MermaidScene } from "./lib/ai";
 import { downloadPng, downloadPptx, downloadSvg, listFrames, svgForElements } from "./lib/exporters";
 
@@ -141,7 +150,12 @@ function BrushSeg({ constant, onPick }: { constant: boolean; onPick: (v: boolean
 }
 
 export default function App() {
-  const [scenes, setScenes] = useState<SceneMeta[]>(() => purgeCheck(loadScenes()));
+  const [collections, setCollections] = useState<Collection[]>(initCollections);
+  const [scenes, setScenes] = useState<SceneMeta[]>(() =>
+    migrateSceneFolders(purgeCheck(loadScenes()), collections),
+  );
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>(loadCollapsed);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [trash, setTrash] = useState<TrashedScene[]>(() => purgeExpiredTrash(loadTrash()));
   const [activeId, setActiveId] = useState<string>(() => {
     const saved = loadActiveId();
@@ -260,6 +274,14 @@ export default function App() {
     return () => window.clearTimeout(t);
   }, [trash]);
   useEffect(() => {
+    const t = window.setTimeout(() => saveCollections(collections), 400);
+    return () => window.clearTimeout(t);
+  }, [collections]);
+  useEffect(() => {
+    const t = window.setTimeout(() => saveCollapsed(collapsed), 400);
+    return () => window.clearTimeout(t);
+  }, [collapsed]);
+  useEffect(() => {
     document.documentElement.dataset.flavor = flavor;
     try {
       localStorage.setItem(FLAVOR_KEY, flavor);
@@ -296,17 +318,101 @@ export default function App() {
     setDashOpen(false);
   };
 
-  const createScene = (collection = "Work") => {
+  const fallbackId = collections[0]?.id ?? "Work";
+  const collName = (id: string) => collections.find((c) => c.id === id)?.name ?? id;
+
+  const createScene = (collectionId: string = fallbackId) => {
     const s: SceneMeta = {
       id: uid(),
       name: `untitled-${scenes.length + 1}`,
-      collection,
+      collection: collectionId,
       updatedAt: Date.now(),
       data: { elements: [], files: {} },
     };
     setScenes((prev) => [s, ...prev]);
     switchScene(s.id);
-    showToast(`New scene in ${collection} — saved locally`);
+    showToast(`New scene in ${collName(collectionId)} — saved locally`);
+  };
+
+  const createCollection = () => {
+    const name = window.prompt("New folder name:", `Folder ${collections.length + 1}`)?.trim();
+    if (!name) return;
+    if (collections.some((c) => c.name.toLowerCase() === name.toLowerCase())) {
+      showToast(`Folder "${name}" already exists`);
+      return;
+    }
+    const c: Collection = { id: uid(), name };
+    setCollections((prev) => [...prev, c]);
+    setCollapsed((prev) => ({ ...prev, [c.id]: false }));
+    showToast(`Folder "${name}" created`);
+  };
+
+  const renameCollection = (id: string) => {
+    const cur = collections.find((c) => c.id === id);
+    if (!cur) return;
+    const name = window.prompt("Rename folder:", cur.name)?.trim();
+    if (!name || name === cur.name) return;
+    if (collections.some((c) => c.id !== id && c.name.toLowerCase() === name.toLowerCase())) {
+      showToast(`Folder "${name}" already exists`);
+      return;
+    }
+    setCollections((prev) => prev.map((c) => (c.id === id ? { ...c, name } : c)));
+  };
+
+  const deleteCollection = (id: string) => {
+    const cur = collections.find((c) => c.id === id);
+    if (!cur) return;
+    if (collections.length <= 1) {
+      showToast("Keep at least one folder");
+      return;
+    }
+    const contained = scenes.filter((s) => s.collection === id).length;
+    if (
+      !window.confirm(
+        `Delete folder "${cur.name}"?${contained > 0 ? ` ${contained} scene(s) move to another folder.` : ""}`,
+      )
+    )
+      return;
+    const rest = collections.filter((c) => c.id !== id);
+    const target = rest[0].id;
+    setScenes((prev) =>
+      prev.map((s) => (s.collection === id ? { ...s, collection: target, updatedAt: Date.now() } : s)),
+    );
+    setTrash((prev) => prev.map((t) => (t.restoreTo === id ? { ...t, restoreTo: target } : t)));
+    setCollections(rest);
+    setCollapsed((prev) => {
+      const v = { ...prev };
+      delete v[id];
+      return v;
+    });
+    showToast(`Deleted folder "${cur.name}"`);
+  };
+
+  const moveScene = (sceneId: string, collectionId: string) => {
+    const scene = scenes.find((s) => s.id === sceneId);
+    const folder = collections.find((c) => c.id === collectionId);
+    if (!scene || !folder || scene.collection === collectionId) return;
+    setScenes((prev) =>
+      prev.map((s) => (s.id === sceneId ? { ...s, collection: collectionId, updatedAt: Date.now() } : s)),
+    );
+    showToast(`Moved "${scene.name}" → ${folder.name}`);
+  };
+
+  const SCENE_MIME = "application/x-neattttty-scene";
+  const onSceneDragStart = (e: DragEvent<HTMLDivElement>, sceneId: string) => {
+    e.dataTransfer.setData(SCENE_MIME, sceneId);
+    e.dataTransfer.effectAllowed = "move";
+  };
+  const onFolderDragOver = (e: DragEvent<HTMLDivElement>, folderId: string) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    setDropTarget(folderId);
+  };
+  const onFolderDrop = (e: DragEvent<HTMLDivElement>, folderId: string) => {
+    e.preventDefault();
+    const sceneId = e.dataTransfer.getData(SCENE_MIME);
+    setDropTarget(null);
+    if (sceneId) moveScene(sceneId, folderId);
   };
 
   const duplicateScene = (id: string) => {
@@ -521,6 +627,29 @@ export default function App() {
     }
   };
 
+  const deleteFrame = (frameId: string) => {
+    const cur: any[] = apiRef.current?.getSceneElements?.() ?? active?.data.elements ?? [];
+    const target = cur.find((e: any) => e.id === frameId);
+    const label = String(target?.name ?? "Frame");
+    if (!window.confirm(`Delete slide "${label}" and its contents from the canvas?`)) return;
+    const next = cur.filter((e: any) => e.id !== frameId && e.frameId !== frameId);
+    try {
+      apiRef.current?.updateScene?.({ elements: next });
+    } catch {
+      /* mirror update below still applies */
+    }
+    // Write-through to the mirror so Slides updates even if the onChange echo is missed.
+    const id = activeIdRef.current;
+    sceneSigRef.current[id] = sigFor(next, active?.data.files, active?.data.appState?.viewBackgroundColor);
+    setScenes((prev) =>
+      prev.map((s) =>
+        s.id === id ? { ...s, updatedAt: Date.now(), data: { ...s.data, elements: next } } : s,
+      ),
+    );
+    setPresentIdx((i) => Math.max(0, Math.min(i, Math.max(frames.length - 2, 0))));
+    showToast(`Deleted slide "${label}"`);
+  };
+
   const startPresent = () => {
     if (frames.length === 0) {
       showToast("Add a Frame (▦ tool) to make slides first");
@@ -596,9 +725,8 @@ export default function App() {
   };
 
   const filtered = scenes.filter((s) =>
-    search.trim() ? `${s.name} ${s.collection}`.toLowerCase().includes(search.toLowerCase()) : true,
+    search.trim() ? `${s.name} ${collName(s.collection)}`.toLowerCase().includes(search.toLowerCase()) : true,
   );
-  const collections = [...new Set(scenes.map((s) => s.collection))];
   const noteKey = `${activeIdSafe}:${frames[Math.min(presentIdx, Math.max(frames.length - 1, 0))]?.id ?? "none"}`;
 
   return (
@@ -611,7 +739,7 @@ export default function App() {
           <div className="filepill">
             <b>Neattttty</b>
             <small>
-              ~/{active?.collection}/{active?.name}
+              ~/{active ? collName(active.collection) : ""}/{active?.name}
             </small>
             <span className="saved">● {isTauri ? "desktop · local" : "local"}</span>
           </div>
@@ -649,45 +777,89 @@ export default function App() {
             <div>
               <div className="side-h">Scenes · {scenes.length} on disk</div>
               <input className="search" placeholder="Search scenes…" value={search} onChange={(e) => setSearch(e.target.value)} />
+              <button className="btn newfolder" onClick={createCollection}>
+                <Plus size={13} /> New folder
+              </button>
             </div>
-            <div>
-              {filtered.map((s) => (
-                <div key={s.id} className="scene-row-wrap" style={{ position: "relative" }}>
-                  <button className={`scene-row${s.id === activeIdSafe ? " on" : ""}`} onClick={() => switchScene(s.id)}>
-                    <span className="thumb" />
-                    <span style={{ minWidth: 0 }}>
-                      <b>{s.name}</b>
-                      <small>
-                        {s.collection} · {new Date(s.updatedAt).toLocaleDateString()}
-                      </small>
-                    </span>
-                  </button>
-                  {scenes.length > 1 && (
+            {collections.map((c) => {
+              const items = filtered.filter((s) => s.collection === c.id);
+              const total = scenes.filter((s) => s.collection === c.id).length;
+              const isCollapsed = !!collapsed[c.id];
+              const isDrop = dropTarget === c.id;
+              return (
+                <div
+                  key={c.id}
+                  className={`coll-group${isDrop ? " drop" : ""}`}
+                  onDragOver={(e) => onFolderDragOver(e, c.id)}
+                  onDragLeave={() => setDropTarget((cur) => (cur === c.id ? null : cur))}
+                  onDrop={(e) => onFolderDrop(e, c.id)}
+                >
+                  <div className="coll-head">
                     <button
-                      className="scene-del"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        trashScene(s.id);
-                      }}
-                      aria-label={`Delete ${s.name}`}
-                      title="Delete"
+                      className="coll-toggle"
+                      onClick={() => setCollapsed((prev) => ({ ...prev, [c.id]: !prev[c.id] }))}
+                      title={isCollapsed ? "Expand" : "Collapse"}
+                      aria-expanded={!isCollapsed}
                     >
-                      <Trash2 size={12} />
+                      <span className="chev">{isCollapsed ? "▸" : "▾"}</span>
+                      <Folder size={14} />
+                      <b>{c.name}</b>
+                      <small>{total}</small>
                     </button>
+                    <span className="coll-tools">
+                      <button className="tool" onClick={() => createScene(c.id)} title={`New scene in ${c.name}`} aria-label={`New scene in ${c.name}`}>
+                        <Plus size={13} />
+                      </button>
+                      <button className="tool" onClick={() => renameCollection(c.id)} title="Rename folder" aria-label={`Rename ${c.name}`}>
+                        <Pencil size={12} />
+                      </button>
+                      <button className="tool danger" onClick={() => deleteCollection(c.id)} title="Delete folder" aria-label={`Delete ${c.name}`}>
+                        <Trash2 size={12} />
+                      </button>
+                    </span>
+                  </div>
+                  {!isCollapsed &&
+                    items.map((s) => (
+                      <div
+                        key={s.id}
+                        className="scene-row-wrap"
+                        style={{ position: "relative" }}
+                        draggable
+                        onDragStart={(e) => onSceneDragStart(e, s.id)}
+                      >
+                        <button className={`scene-row${s.id === activeIdSafe ? " on" : ""}`} onClick={() => switchScene(s.id)}>
+                          <span className="thumb" />
+                          <span style={{ minWidth: 0 }}>
+                            <b>{s.name}</b>
+                            <small>
+                              {collName(s.collection)} · {new Date(s.updatedAt).toLocaleDateString()}
+                            </small>
+                          </span>
+                        </button>
+                        {scenes.length > 1 && (
+                          <button
+                            className="scene-del"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              trashScene(s.id);
+                            }}
+                            aria-label={`Delete ${s.name}`}
+                            title="Delete"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  {!isCollapsed && items.length === 0 && (
+                    <div className="coll-empty">{search.trim() ? "No matches." : "Drop scenes here."}</div>
                   )}
                 </div>
-              ))}
-              {filtered.length === 0 && <div style={{ fontSize: 12, color: "var(--subtext0)", padding: "0 4px" }}>No matches.</div>}
-            </div>
-            <div>
-              <div className="side-h">Collections</div>
-              {collections.map((c) => (
-                <div className="coll-row" key={c}>
-                  <span className="mi"><Folder size={14} /> {c}</span>
-                  <span>{scenes.filter((s) => s.collection === c).length}</span>
-                </div>
-              ))}
-            </div>
+              );
+            })}
+            {filtered.length === 0 && search.trim() !== "" && collections.every((c) => !filtered.some((s) => s.collection === c.id)) && (
+              <div style={{ fontSize: 12, color: "var(--subtext0)", padding: "0 4px" }}>No matches.</div>
+            )}
             <div className="trash-box">
               <span className="mi"><Trash2 size={13} /> Trash: {trash.length} · restores 30 days</span>
               {trash.length > 0 && (
@@ -812,12 +984,25 @@ export default function App() {
                     </div>
                   )}
                   {frames.map((f, i) => (
-                    <button key={f.id} className={`slide-row${i === presentIdx ? " on" : ""}`} onClick={() => goToFrame(i)}>
-                      <i />
-                      <span>
-                        <b style={{ fontSize: 12.5 }}>{i + 1} · {f.name}</b>
-                      </span>
-                    </button>
+                    <div key={f.id} className="scene-row-wrap">
+                      <button className={`slide-row${i === presentIdx ? " on" : ""}`} onClick={() => goToFrame(i)}>
+                        <i />
+                        <span>
+                          <b style={{ fontSize: 12.5 }}>{i + 1} · {f.name}</b>
+                        </span>
+                      </button>
+                      <button
+                        className="scene-del"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          deleteFrame(f.id);
+                        }}
+                        aria-label={`Delete slide ${f.name}`}
+                        title="Delete slide"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
                   ))}
                 </div>
                 {frames.length > 0 && (
@@ -926,7 +1111,7 @@ export default function App() {
                   <b>{s.name}</b>
                   <br />
                   <small>
-                    {s.collection} · {s.data.elements.length} els
+                    {collName(s.collection)} · {s.data.elements.length} els
                   </small>
                   <div className="row">
                     <button
@@ -989,13 +1174,16 @@ export default function App() {
                       <b>{t.name}</b>
                       <br />
                       <small>
-                        deleted {new Date(t.deletedAt).toLocaleDateString()} → {t.restoreTo}
+                        deleted {new Date(t.deletedAt).toLocaleDateString()} → {collName(t.restoreTo)}
                       </small>
                       <div className="row">
                         <button
                           className="btn"
                           onClick={() => {
-                            setScenes((prev) => [{ ...t, collection: t.restoreTo, updatedAt: Date.now() }, ...prev]);
+                            const target = collections.some((c) => c.id === t.restoreTo)
+                              ? t.restoreTo
+                              : (collections.find((c) => c.name === t.restoreTo)?.id ?? fallbackId);
+                            setScenes((prev) => [{ ...t, collection: target, updatedAt: Date.now() }, ...prev]);
                             setTrash((prev) => prev.filter((x) => x.id !== t.id));
                             switchScene(t.id);
                           }}
@@ -1286,7 +1474,7 @@ export default function App() {
             const s: SceneMeta = {
               id: uid(),
               name: f.name.replace(/\.excalidraw$|\.json$/i, "") || "imported",
-              collection: "Work",
+              collection: fallbackId,
               updatedAt: Date.now(),
               data,
             };
