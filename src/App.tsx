@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Excalidraw } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import {
@@ -53,6 +53,7 @@ import {
   saveCollections,
   type Collection,
 } from "./lib/collections";
+import ContextMenu, { type CtxItem } from "./components/ContextMenu";
 import { AI_DEFAULTS, generateMermaid, mermaidToScene, shiftScene, type AIConfig, type AIKind, type MermaidScene } from "./lib/ai";
 import { downloadPng, downloadPptx, downloadSvg, listFrames, svgForElements } from "./lib/exporters";
 
@@ -155,7 +156,7 @@ export default function App() {
     migrateSceneFolders(purgeCheck(loadScenes()), collections),
   );
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(loadCollapsed);
-  const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const [ctx, setCtx] = useState<{ x: number; y: number; items: CtxItem[] } | null>(null);
   const [trash, setTrash] = useState<TrashedScene[]>(() => purgeExpiredTrash(loadTrash()));
   const [activeId, setActiveId] = useState<string>(() => {
     const saved = loadActiveId();
@@ -335,8 +336,13 @@ export default function App() {
   };
 
   const createCollection = () => {
-    const name = window.prompt("New folder name:", `Folder ${collections.length + 1}`)?.trim();
-    if (!name) return;
+    const input = window.prompt("New folder name:", `Folder ${collections.length + 1}`);
+    if (input === null) return;
+    const name = input.trim();
+    if (!name) {
+      showToast("Folder name can't be empty");
+      return;
+    }
     if (collections.some((c) => c.name.toLowerCase() === name.toLowerCase())) {
       showToast(`Folder "${name}" already exists`);
       return;
@@ -345,6 +351,17 @@ export default function App() {
     setCollections((prev) => [...prev, c]);
     setCollapsed((prev) => ({ ...prev, [c.id]: false }));
     showToast(`Folder "${name}" created`);
+  };
+
+  /** Get-or-create a folder by name (no prompt). Returns its id. */
+  const ensureCollection = (rawName: string): string => {
+    const name = rawName.trim() || "Imported";
+    const hit = collections.find((c) => c.name.toLowerCase() === name.toLowerCase());
+    if (hit) return hit.id;
+    const c: Collection = { id: uid(), name };
+    setCollections((prev) => [...prev, c]);
+    setCollapsed((prev) => ({ ...prev, [c.id]: false }));
+    return c.id;
   };
 
   const renameCollection = (id: string) => {
@@ -398,22 +415,37 @@ export default function App() {
     showToast(`Moved "${scene.name}" → ${folder.name}`);
   };
 
-  const SCENE_MIME = "application/x-neattttty-scene";
-  const onSceneDragStart = (e: DragEvent<HTMLDivElement>, sceneId: string) => {
-    e.dataTransfer.setData(SCENE_MIME, sceneId);
-    e.dataTransfer.effectAllowed = "move";
-  };
-  const onFolderDragOver = (e: DragEvent<HTMLDivElement>, folderId: string) => {
+  /** Minimal shape we need from a contextmenu event (matches React's synthetic event). */
+  interface CtxEvent {
+    clientX: number;
+    clientY: number;
+    preventDefault(): void;
+    stopPropagation(): void;
+  }
+  const openCtx = (e: CtxEvent, items: CtxItem[]) => {
     e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
-    setDropTarget(folderId);
+    e.stopPropagation();
+    setCtx({ x: e.clientX, y: e.clientY, items });
   };
-  const onFolderDrop = (e: DragEvent<HTMLDivElement>, folderId: string) => {
-    e.preventDefault();
-    const sceneId = e.dataTransfer.getData(SCENE_MIME);
-    setDropTarget(null);
-    if (sceneId) moveScene(sceneId, folderId);
+  const sceneCtx = (s: SceneMeta): CtxItem[] => {
+    const others = collections.filter((c) => c.id !== s.collection);
+    return [
+      { label: "Open", action: () => switchScene(s.id) },
+      others.length > 0
+        ? {
+            label: "Move to",
+            children: others.map((c) => ({ label: c.name, action: () => moveScene(s.id, c.id) })),
+          }
+        : { label: "Move to", disabled: true },
+      { label: "Duplicate", action: () => duplicateScene(s.id) },
+      { label: "Delete", danger: true, action: () => trashScene(s.id) },
+    ];
   };
+  const folderCtx = (c: Collection): CtxItem[] => [
+    { label: "New scene here", action: () => createScene(c.id) },
+    { label: "Rename folder", action: () => renameCollection(c.id) },
+    { label: "Delete folder", danger: true, action: () => deleteCollection(c.id) },
+  ];
 
   const duplicateScene = (id: string) => {
     const src = scenes.find((s) => s.id === id);
@@ -696,13 +728,50 @@ export default function App() {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
         e.preventDefault();
-        saveScenes(scenes);
+        // Flush the live canvas into the mirror first, so the save holds
+        // exactly what's on screen — never a stale echo.
+        let next = scenes;
+        try {
+          const els = apiRef.current?.getSceneElements?.();
+          if (Array.isArray(els)) {
+            let bg: unknown;
+            try {
+              bg = apiRef.current?.getAppState?.()?.viewBackgroundColor;
+            } catch {
+              bg = undefined;
+            }
+            const id = activeIdRef.current;
+            sceneSigRef.current[id] = sigFor(
+              els,
+              active?.data.files,
+              bg ?? active?.data.appState?.viewBackgroundColor,
+            );
+            next = scenes.map((s) =>
+              s.id === id
+                ? {
+                    ...s,
+                    data: {
+                      ...s.data,
+                      elements: [...els],
+                      ...(bg !== undefined
+                        ? { appState: { ...(s.data.appState ?? {}), viewBackgroundColor: bg } }
+                        : null),
+                    },
+                  }
+                : s,
+            );
+            setScenes(next);
+          }
+        } catch {
+          /* fall back to the mirror as-is */
+        }
+        saveScenes(next);
         showToast("Saved ✓ (local)");
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [scenes, showToast]);
+  }, [scenes, showToast, active]);
 
   const exportPdf = async () => {
     try {
@@ -731,7 +800,7 @@ export default function App() {
 
   return (
     <div className="app">
-      <header className="appbar">
+      <header className="appbar" onContextMenu={(e) => e.preventDefault()}>
         <div className="brand-mini">
           <button className="iconbtn" onClick={() => setMenuOpen((v) => !v)} title="Menu" aria-label="Menu">
             <Menu size={17} />
@@ -773,7 +842,7 @@ export default function App() {
 
       <div className="main">
         {railOpen && (
-          <aside className="rail">
+          <aside className="rail" onContextMenu={(e) => e.preventDefault()}>
             <div>
               <div className="side-h">Scenes · {scenes.length} on disk</div>
               <input className="search" placeholder="Search scenes…" value={search} onChange={(e) => setSearch(e.target.value)} />
@@ -785,16 +854,9 @@ export default function App() {
               const items = filtered.filter((s) => s.collection === c.id);
               const total = scenes.filter((s) => s.collection === c.id).length;
               const isCollapsed = !!collapsed[c.id];
-              const isDrop = dropTarget === c.id;
               return (
-                <div
-                  key={c.id}
-                  className={`coll-group${isDrop ? " drop" : ""}`}
-                  onDragOver={(e) => onFolderDragOver(e, c.id)}
-                  onDragLeave={() => setDropTarget((cur) => (cur === c.id ? null : cur))}
-                  onDrop={(e) => onFolderDrop(e, c.id)}
-                >
-                  <div className="coll-head">
+                <div key={c.id} className="coll-group">
+                  <div className="coll-head" onContextMenu={(e) => openCtx(e, folderCtx(c))}>
                     <button
                       className="coll-toggle"
                       onClick={() => setCollapsed((prev) => ({ ...prev, [c.id]: !prev[c.id] }))}
@@ -824,8 +886,7 @@ export default function App() {
                         key={s.id}
                         className="scene-row-wrap"
                         style={{ position: "relative" }}
-                        draggable
-                        onDragStart={(e) => onSceneDragStart(e, s.id)}
+                        onContextMenu={(e) => openCtx(e, sceneCtx(s))}
                       >
                         <button className={`scene-row${s.id === activeIdSafe ? " on" : ""}`} onClick={() => switchScene(s.id)}>
                           <span className="thumb" />
@@ -966,7 +1027,7 @@ export default function App() {
             </div>
           )}
 
-          <div className="slides-dock">
+          <div className="slides-dock" onContextMenu={(e) => e.preventDefault()}>
             <div className="tabs">
               <button className={dockTab === "slides" ? "on" : ""} onClick={() => setDockTab("slides")}>
                 Slides {frames.length > 0 ? `(${frames.length})` : ""}
@@ -1055,7 +1116,7 @@ export default function App() {
             )}
           </div>
 
-          <div className="ai-dock">
+          <div className="ai-dock" onContextMenu={(e) => e.preventDefault()}>
             <button className="model" onClick={() => setAiSettingsOpen(true)} title="AI model settings">
               <Bot size={13} />
               <span className="pulse" />
@@ -1094,6 +1155,9 @@ export default function App() {
             </div>
           )}
 
+          {ctx && (
+            <ContextMenu x={ctx.x} y={ctx.y} items={ctx.items} onClose={() => setCtx(null)} />
+          )}
           {toast && <div className="toast">{toast}</div>}
         </div>
       </div>
@@ -1463,27 +1527,60 @@ export default function App() {
       <input
         ref={fileInputRef}
         type="file"
+        multiple
         accept=".excalidraw,.json,application/json"
         style={{ display: "none" }}
         onChange={async (e) => {
-          const f = e.target.files?.[0];
+          const files = [...(e.target.files ?? [])];
           e.target.value = "";
-          if (!f) return;
-          try {
-            const data = await parseImportedFile(f);
-            const s: SceneMeta = {
-              id: uid(),
-              name: f.name.replace(/\.excalidraw$|\.json$/i, "") || "imported",
-              collection: fallbackId,
-              updatedAt: Date.now(),
-              data,
-            };
-            setScenes((prev) => [s, ...prev]);
-            switchScene(s.id);
-            showToast(`Imported ${s.name} (${data.elements.length} elements)`);
-          } catch {
-            showToast("Could not read that file as .excalidraw JSON");
+          if (files.length === 0) return;
+          if (files.length === 1) {
+            const f = files[0];
+            try {
+              const data = await parseImportedFile(f);
+              const s: SceneMeta = {
+                id: uid(),
+                name: f.name.replace(/\.excalidraw$|\.json$/i, "") || "imported",
+                collection: fallbackId,
+                updatedAt: Date.now(),
+                data,
+              };
+              setScenes((prev) => [s, ...prev]);
+              switchScene(s.id);
+              showToast(`Imported ${s.name} (${data.elements.length} elements)`);
+            } catch {
+              showToast("Could not read that file as .excalidraw JSON");
+            }
+            return;
           }
+          const folderName = window.prompt(`Import ${files.length} files into a new folder:`, "Imported");
+          if (folderName === null) return;
+          const folderId = ensureCollection(folderName);
+          const made: SceneMeta[] = [];
+          let skipped = 0;
+          for (const f of files) {
+            try {
+              const data = await parseImportedFile(f);
+              made.push({
+                id: uid(),
+                name: f.name.replace(/\.excalidraw$|\.json$/i, "") || "imported",
+                collection: folderId,
+                updatedAt: Date.now(),
+                data,
+              });
+            } catch {
+              skipped += 1;
+            }
+          }
+          if (made.length === 0) {
+            showToast("Could not read any of those files as .excalidraw JSON");
+            return;
+          }
+          setScenes((prev) => [...made, ...prev]);
+          switchScene(made[0].id);
+          showToast(
+            `Imported ${made.length} scene(s) into "${collName(folderId)}"${skipped > 0 ? `, skipped ${skipped}` : ""}`,
+          );
         }}
       />
     </div>
