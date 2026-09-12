@@ -1,0 +1,62 @@
+name: "Release"
+
+# Build installers and attach them to a GitHub Release.
+# Usage: git tag v0.1.0 && git push origin v0.1.0
+# The tag name becomes the release name. The release starts as a DRAFT
+# so you can edit the notes before publishing.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  publish:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: "windows-latest"
+            bundle: "nsis"
+          - platform: "ubuntu-22.04"
+            bundle: "appimage,deb"
+          - platform: "macos-latest"
+            bundle: "dmg"
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build and publish
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Neattttty ${{ github.ref_name }}"
+          releaseBody: "Local-first whiteboard. Download the installer for your OS below — no build needed."
+          releaseDraft: true
+          prerelease: false
+          args: --bundles ${{ matrix.bundle }}
