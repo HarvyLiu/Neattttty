@@ -13,8 +13,10 @@ import {
   FileUp,
   Folder,
   FolderPlus,
+  ExternalLink,
   Image as ImageIcon,
   LayoutDashboard,
+  Library,
   Menu,
   PanelLeft,
   Pencil,
@@ -55,6 +57,23 @@ import {
   type Collection,
 } from "./lib/collections";
 import ContextMenu, { type CtxItem } from "./components/ContextMenu";
+import {
+  LIBRARIES_SITE,
+  PERSONAL_ID,
+  addLibraryItems,
+  importLibraryFile,
+  importLibraryFromUrl,
+  loadLibraryStore,
+  loadLibraryUrl,
+  openExternal,
+  parseAddLibraryLink,
+  removeLibrarySource,
+  saveLibraryStore,
+  saveLibraryUrl,
+  sigLibrary,
+  syncFromEditor,
+  type LibraryStore,
+} from "./lib/libraries";
 import { AI_DEFAULTS, generateMermaid, mermaidToScene, shiftScene, type AIConfig, type AIKind, type MermaidScene } from "./lib/ai";
 import { downloadPng, downloadPptx, downloadSvg, listFrames, svgForElements } from "./lib/exporters";
 
@@ -158,6 +177,11 @@ export default function App() {
   );
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(loadCollapsed);
   const [ctx, setCtx] = useState<{ x: number; y: number; items: CtxItem[] } | null>(null);
+  const [libStore, setLibStore] = useState<LibraryStore>(loadLibraryStore);
+  const [libOpen, setLibOpen] = useState(false);
+  const [libLink, setLibLink] = useState("");
+  const [libUrl, setLibUrl] = useState<string>(loadLibraryUrl);
+  const libSigRef = useRef<string>(sigLibrary(libStore.items));
   const [trash, setTrash] = useState<TrashedScene[]>(() => purgeExpiredTrash(loadTrash()));
   const [activeId, setActiveId] = useState<string>(() => {
     const saved = loadActiveId();
@@ -212,6 +236,7 @@ export default function App() {
   const toastTimer = useRef<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
+  const libInputRef = useRef<HTMLInputElement>(null);
   /** Last persisted signature per scene — breaks onChange echo loops. */
   const sceneSigRef = useRef<Record<string, string>>({});
   /** Pressure strokes already flattened to constant — never touch again. */
@@ -285,6 +310,14 @@ export default function App() {
     return () => window.clearTimeout(t);
   }, [collapsed]);
   useEffect(() => {
+    const t = window.setTimeout(() => saveLibraryStore(libStore), 400);
+    return () => window.clearTimeout(t);
+  }, [libStore]);
+  useEffect(() => {
+    const t = window.setTimeout(() => saveLibraryUrl(libUrl), 400);
+    return () => window.clearTimeout(t);
+  }, [libUrl]);
+  useEffect(() => {
     document.documentElement.dataset.flavor = flavor;
     try {
       localStorage.setItem(FLAVOR_KEY, flavor);
@@ -353,6 +386,65 @@ export default function App() {
     setCollections((prev) => [...prev, c]);
     setCollapsed((prev) => ({ ...prev, [c.id]: false }));
     showToast(`Folder "${name}" created`);
+  };
+
+  /** Push items into the editor's native Library panel (merge + open it). */
+  const pushLibraryToEditor = (items: any[]) => {
+    try {
+      apiRef.current?.updateLibrary?.({ libraryItems: items, merge: true, openLibraryMenu: true });
+    } catch {
+      /* panel picks them up on next mount via initialData; the store already saved */
+    }
+  };
+
+  const installLibraryItems = (name: string, kind: "file" | "link", items: any[]) => {
+    const next = addLibraryItems(libStore, name, kind, items);
+    libSigRef.current = sigLibrary(next.items);
+    setLibStore(next);
+    pushLibraryToEditor(items);
+    showToast(`Added ${items.length} item(s) to library`);
+  };
+
+  const handleLibraryChange = (items: any) => {
+    const [next, changed] = syncFromEditor(libStore, items);
+    if (!changed) return;
+    libSigRef.current = sigLibrary(next.items);
+    setLibStore(next);
+  };
+
+  const deleteLibrarySource = (id: string) => {
+    const src = libStore.sources.find((s) => s.id === id);
+    if (!src || id === PERSONAL_ID) return;
+    if (!window.confirm(`Remove "${src.name}" (${src.itemIds.length} item(s)) from the library?`)) return;
+    const next = removeLibrarySource(libStore, id);
+    libSigRef.current = sigLibrary(next.items);
+    setLibStore(next);
+    try {
+      apiRef.current?.updateLibrary?.({ libraryItems: next.items });
+    } catch {
+      /* store is truth; the editor hydrates on next mount */
+    }
+    showToast(`Removed "${src.name}"`);
+  };
+
+  const installFromLink = async () => {
+    const input = libLink.trim();
+    if (!input) return;
+    let parsed;
+    try {
+      parsed = parseAddLibraryLink(input);
+    } catch (err: any) {
+      showToast(err?.message ?? String(err));
+      return;
+    }
+    if (!window.confirm(`Install library from ${parsed.host}?`)) return;
+    try {
+      const items = await importLibraryFromUrl(parsed.libraryUrl);
+      setLibLink("");
+      installLibraryItems(parsed.host, "link", items);
+    } catch (err: any) {
+      showToast(err?.message ?? String(err));
+    }
   };
 
   /** Parse files into scenes inside a folder. Skips unreadable files with a summary. */
@@ -970,8 +1062,10 @@ export default function App() {
                   elements: active.data.elements,
                   appState: { viewBackgroundColor: "#ffffff", ...(active.data.appState ?? {}) },
                   scrollToContent: active.data.elements.length > 0,
+                  libraryItems: libStore.items,
                 }}
                 onChange={handleChange}
+                onLibraryChange={handleLibraryChange}
                 onPointerDown={() => flushConstantBrush()}
                 theme={flavor === "latte" ? "light" : "dark"}
                 name={`Neattttty — ${active.name}`}
@@ -1009,6 +1103,9 @@ export default function App() {
               </button>
               <button onClick={() => { setMenuOpen(false); setDashOpen(true); }}>
                 <span className="mi"><LayoutDashboard size={15} /> Dashboard</span> <small>{scenes.length} scenes</small>
+              </button>
+              <button onClick={() => { setMenuOpen(false); setLibOpen(true); }}>
+                <span className="mi"><Library size={15} /> Libraries…</span> <small>{libStore.items.length} items</small>
               </button>
               <hr />
               <button
@@ -1320,6 +1417,88 @@ export default function App() {
         </div>
       )}
 
+      {libOpen && (
+        <div className="overlay" style={{ position: "fixed" }} onClick={(e) => e.target === e.currentTarget && setLibOpen(false)}>
+          <div className="dialog" style={{ maxWidth: 640 }}>
+            <h3>Libraries — {libStore.items.length} items, import-only</h3>
+            <p>
+              Shape packs plus your own additions. Day to day, use the <b>Library panel</b> in the
+              canvas toolbar (book icon): search, click an item to stamp it, and add your own by
+              selecting elements on the canvas → add. Library content follows its publisher's license.
+            </p>
+            <div className="row">
+              <button className="btn" onClick={() => void openExternal(LIBRARIES_SITE)}>
+                <span className="mi"><ExternalLink size={15} /> Browse libraries</span>
+              </button>
+              <button className="btn" onClick={() => libInputRef.current?.click()}>
+                <span className="mi"><FileUp size={15} /> Import .excalidrawlib</span>
+              </button>
+            </div>
+            <div className="row">
+              <label className="f">
+                Add from excalidraw.com link
+                <input
+                  value={libLink}
+                  onChange={(e) => setLibLink(e.target.value)}
+                  placeholder="https://excalidraw.com/#addLibrary=…"
+                  spellCheck={false}
+                />
+              </label>
+              <button
+                className="btn primary"
+                style={{ flex: "0 0 auto", alignSelf: "flex-end", height: 37 }}
+                onClick={() => void installFromLink()}
+                disabled={!libLink.trim()}
+              >
+                Install
+              </button>
+            </div>
+            <div className="row">
+              <label className="f">
+                My library page (this machine only)
+                <input
+                  value={libUrl}
+                  onChange={(e) => setLibUrl(e.target.value)}
+                  placeholder="https://libraries.excalidraw.com/…"
+                  spellCheck={false}
+                />
+              </label>
+              <button
+                className="btn"
+                style={{ flex: "0 0 auto", alignSelf: "flex-end", height: 37 }}
+                onClick={() => libUrl.trim() && void openExternal(libUrl.trim())}
+                disabled={!libUrl.trim()}
+              >
+                Open
+              </button>
+            </div>
+            <div className="grid" style={{ marginTop: 12 }}>
+              {libStore.sources.map((s) => (
+                <div className="card" key={s.id}>
+                  <b>{s.name}</b>
+                  <br />
+                  <small>
+                    {s.kind} · {s.itemIds.length} items · {new Date(s.addedAt).toLocaleDateString()}
+                  </small>
+                  {s.id !== PERSONAL_ID && (
+                    <div className="row">
+                      <button className="btn" onClick={() => deleteLibrarySource(s.id)}>
+                        Remove
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+            <div className="row">
+              <button className="btn primary" onClick={() => setLibOpen(false)}>
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {aiSettingsOpen && (
         <div className="overlay" style={{ position: "fixed" }} onClick={(e) => e.target === e.currentTarget && setAiSettingsOpen(false)}>
           <div className="dialog" style={{ maxWidth: 560 }}>
@@ -1622,6 +1801,24 @@ export default function App() {
           const folderName = window.prompt(`Import ${files.length} file(s) into a new folder:`, topDir);
           if (folderName === null) return;
           await importManyFiles(files, ensureCollection(folderName));
+        }}
+      />
+      <input
+        ref={libInputRef}
+        type="file"
+        accept=".excalidrawlib,application/json"
+        style={{ display: "none" }}
+        onChange={async (e) => {
+          const f = e.target.files?.[0];
+          e.target.value = "";
+          if (!f) return;
+          try {
+            const items = await importLibraryFile(f);
+            const name = f.name.replace(/\.excalidrawlib$/i, "") || "library";
+            installLibraryItems(name, "file", items);
+          } catch (err: any) {
+            showToast(err?.message ?? String(err));
+          }
         }}
       />
     </div>

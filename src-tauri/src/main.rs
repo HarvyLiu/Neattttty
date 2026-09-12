@@ -46,6 +46,7 @@ async fn ai_fetch(
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![ai_fetch])
         .run(tauri::generate_context!())
         .expect("error while running Neattttty");
