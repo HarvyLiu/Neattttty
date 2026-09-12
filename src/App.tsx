@@ -58,9 +58,9 @@ import {
   BUCKET_KEY,
   DRAW_SHAPE_KEY,
   absolutePoints,
+  buildRecognizedElement,
   floodRegion,
-  recognizeStroke,
-  shapeToPartial,
+  recognizeShape,
 } from "./lib/shapeTools";
 import {
   copyText,
@@ -668,34 +668,42 @@ export default function App() {
     if (ids.length === 0 || !drawShapeRef.current) return;
     const api = apiRef.current;
     const els: any[] = api?.getSceneElements?.() ?? [];
-    let style = {
-      strokeColor: "#1e1e1e",
-      backgroundColor: "transparent",
-      fillStyle: "solid",
-      strokeWidth: 2,
-      roughness: 1,
+    const st = api?.getAppState?.() ?? {};
+    const zoom = typeof st?.zoom === "number" ? st.zoom : (st?.zoom?.value ?? 1) || 1;
+    const style = {
+      strokeColor: st?.currentItemStrokeColor ?? "#1e1e1e",
+      backgroundColor: st?.currentItemBackgroundColor ?? "transparent",
+      fillStyle: st?.currentItemFillStyle ?? "solid",
+      strokeWidth: st?.currentItemStrokeWidth ?? 2,
+      roughness: st?.currentItemRoughness ?? 1,
+      opacity: st?.currentItemOpacity ?? 100,
+      startArrowhead: st?.currentItemStartArrowhead ?? null,
+      endArrowhead: st?.currentItemEndArrowhead ?? "arrow",
     };
-    try {
-      const st = api?.getAppState?.();
-      style = {
-        strokeColor: st?.currentItemStrokeColor ?? style.strokeColor,
-        backgroundColor: st?.currentItemBackgroundColor ?? style.backgroundColor,
-        fillStyle: st?.currentItemFillStyle ?? style.fillStyle,
-        strokeWidth: st?.currentItemStrokeWidth ?? style.strokeWidth,
-        roughness: st?.currentItemRoughness ?? style.roughness,
-      };
-    } catch {
-      /* ignore */
-    }
     const byId = new Map<string, any>(els.map((e: any) => [e?.id, e]));
     const next = [...els];
     let changed = false;
     for (const id of ids) {
       const e = byId.get(id);
       if (!e || e.type !== "freedraw" || e.isDeleted) continue;
-      const rec = recognizeStroke(absolutePoints(e));
-      if (!rec) continue;
-      const partial = shapeToPartial(rec.kind, rec.box, style);
+      const rec = recognizeShape(absolutePoints(e), zoom);
+      if (rec.type === "freedraw") continue;
+      const [bx0, by0, bx1, by1] = rec.boundingBox;
+      const frameId =
+        [...els]
+          .reverse()
+          .find(
+            (x: any) =>
+              x?.type === "frame" &&
+              !x?.isDeleted &&
+              typeof x.x === "number" &&
+              typeof x.y === "number" &&
+              x.x <= bx0 &&
+              x.y <= by0 &&
+              x.x + (x.width ?? 0) >= bx1 &&
+              x.y + (x.height ?? 0) >= by1,
+          )?.id ?? null;
+      const partial = buildRecognizedElement(rec, { ...style, frameId });
       const idx = next.findIndex((x: any) => x?.id === id);
       if (idx < 0) continue;
       try {
@@ -1382,7 +1390,7 @@ export default function App() {
 
         <div className="canvas-zone">
           {active && (
-            <div className={`excalidraw-host${bucketOn ? " bucket-armed" : ""}`} key={active.id}>
+            <div className={`excalidraw-host${bucketOn ? " bucket-armed" : ""}${drawShapeOn ? " shape-armed" : ""}`} key={active.id}>
               <Excalidraw
                 initialData={{
                   elements: active.data.elements,

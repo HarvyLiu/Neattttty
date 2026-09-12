@@ -105,6 +105,7 @@ html[data-flavor="latte"] .saved{color:var(--green-deep)}
 .excalidraw-host .excalidraw{--color-primary:var(--green);--color-primary-darker:var(--green-deep);--color-primary-darkest:var(--green-deep);height:100%}
 /* Bucket tool cursor: paint droplet while armed */
 .excalidraw-host.bucket-armed canvas{cursor:url("data:image/svg+xml;utf8,<svg%20xmlns='http://www.w3.org/2000/svg'%20width='22'%20height='22'%20viewBox='0%200%2024%2024'%20fill='%23A6D189'%20stroke='%2311111B'%20stroke-width='2'><path%20d='M12%202C12%202%205%2011%205%2015a7%207%200%200%200%2014%200C19%2011%2012%202%2012%202Z'/></svg>") 6 20,crosshair}
+.excalidraw-host.shape-armed canvas{cursor:crosshair}
 
 .ai-dock{position:absolute;left:50%;transform:translateX(-50%);bottom:12px;width:min(640px,94%);background:var(--panel);border:1px solid var(--green);border-radius:14px;padding:7px;display:flex;gap:7px;align-items:center;z-index:20;box-shadow:0 8px 28px -10px rgba(0,0,0,.5)}
 .model{background:var(--surface0);border:1px solid var(--panel-border);color:var(--text);border-radius:9px;font:500 11.5px var(--font-mono);padding:8px 9px;display:flex;gap:7px;align-items:center;white-space:nowrap;cursor:pointer;max-width:230px;overflow:hidden}
