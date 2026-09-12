@@ -45,12 +45,8 @@ rasterized artwork ships, not the font file.
 Run `npm ls` / `cargo tree` for the full dependency list.
 No Excalidraw+ proprietary code, templates, styles, or assets are included.
 
-## Ported algorithms (MIT, same license as above)
+## Ported ideas (MIT, same license as above)
 
-- `src/lib/shapeTools.ts` recognition math (resampling, PCA moments,
-  hull-fill / corner-turn / kurtosis prototypes, arrow endpoint) is adapted
-  from `packages/element/src/convertToShape.ts` in
-  github.com/excalidraw/excalidraw (draw-to-shape, PR #9313).
 - Bucket-fill tolerances (6px gap bridging, tiny min-area) follow
   `packages/element/src/bucketFill.ts` in the same repository (#11799);
   the raster/flood/trace pipeline itself is original.

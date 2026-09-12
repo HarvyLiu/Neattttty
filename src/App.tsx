@@ -22,7 +22,6 @@ import {
   Presentation,
   Save,
   SendHorizontal,
-  Shapes,
   SlidersHorizontal,
   Sparkles,
   Trash2,
@@ -56,11 +55,8 @@ import ContextMenu, { type CtxItem } from "./components/ContextMenu";
 import {
   BUCKET_COLORS,
   BUCKET_KEY,
-  DRAW_SHAPE_KEY,
-  absolutePoints,
-  buildRecognizedElement,
+  findFillOwner,
   floodRegion,
-  recognizeShape,
 } from "./lib/shapeTools";
 import {
   copyText,
@@ -219,14 +215,6 @@ export default function App() {
       return false;
     }
   });
-  /** Draw-to-shape: finished freedraw strokes auto-become clean shapes. */
-  const [drawShapeOn, setDrawShapeOn] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem(DRAW_SHAPE_KEY) === "1";
-    } catch {
-      return false;
-    }
-  });
   /** Bucket fill armed: canvas clicks flood-fill the enclosed area. */
   const [bucketOn, setBucketOn] = useState<boolean>(() => {
     try {
@@ -245,15 +233,9 @@ export default function App() {
   const sceneSigRef = useRef<Record<string, string>>({});
   /** Pressure strokes already flattened to constant — never touch again. */
   const flattenedRef = useRef<Set<string>>(new Set());
-  /** Freedraw strokes already seen (draw-to-shape only converts new ones). */
-  const seenStrokeRef = useRef<Set<string>>(new Set());
-  const pendingStrokeRef = useRef<Set<string>>(new Set());
-  const strokeTimer = useRef<number | null>(null);
-  const drawShapeRef = useRef(drawShapeOn);
   const bucketRef = useRef(bucketOn);
   const constantBrushRef = useRef(constantBrush);
   constantBrushRef.current = constantBrush;
-  drawShapeRef.current = drawShapeOn;
   bucketRef.current = bucketOn;
 
   const active = scenes.find((s) => s.id === activeId) ?? scenes[0];
@@ -290,20 +272,6 @@ export default function App() {
       /* ignore */
     }
   };
-
-  const setDrawShape = useCallback(
-    (on: boolean) => {
-      setDrawShapeOn(on);
-      try {
-        localStorage.setItem(DRAW_SHAPE_KEY, on ? "1" : "0");
-      } catch {
-        /* ignore */
-      }
-      if (on) switchEditorTool("freedraw");
-      showToast(on ? "Draw-to-shape pen — sketch, it snaps on release" : "Draw to shape off");
-    },
-    [showToast],
-  );
 
   const setBucket = useCallback(
     (on: boolean) => {
@@ -604,17 +572,6 @@ export default function App() {
     showToast("Moved to trash (30-day restore)");
   };
 
-  /** Schedule a draw-to-shape pass (debounced; latest call wins). */
-  const scheduleConvert = useCallback(
-    (ms: number) => {
-      if (strokeTimer.current) window.clearTimeout(strokeTimer.current);
-      strokeTimer.current = window.setTimeout(() => void convertPendingStrokes(), ms);
-    },
-    // convertPendingStrokes is stable (empty deps) — safe to omit here.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
-  );
-
   const handleChange = useCallback((elements: any, appState: any, files: any) => {
     const id = activeIdRef.current;
     const els: any[] = elements ?? [];
@@ -638,22 +595,7 @@ export default function App() {
           : s,
       ),
     );
-    // Draw-to-shape: queue new freedraw strokes; convert after a quiet spell.
-    if (drawShapeRef.current) {
-      const seen = seenStrokeRef.current;
-      let fresh = false;
-      for (const e of els) {
-        if (e?.type === "freedraw" && typeof e.id === "string" && !seen.has(e.id)) {
-          seen.add(e.id);
-          if ((e.points?.length ?? 0) >= 6 && !e.isDeleted) {
-            pendingStrokeRef.current.add(e.id);
-            fresh = true;
-          }
-        }
-      }
-      if (fresh) scheduleConvert(700);
-    }
-  }, [syncTool, scheduleConvert]);
+  }, [syncTool]);
 
   // Constant-brush option: flatten previously committed pressure strokes.
   // Runs at pointer-down (and when the option is switched on). Never touches
@@ -661,73 +603,41 @@ export default function App() {
   // point, and only strokes with 2+ points are eligible. Strokes the user
   // retouches in the canvas Pressure panel afterwards are recorded as
   // flattened and left alone.
-  /** Convert queued freedraw strokes to clean shapes (single undo step). */
-  const convertPendingStrokes = useCallback(async () => {
-    const ids = [...pendingStrokeRef.current];
-    pendingStrokeRef.current.clear();
-    if (ids.length === 0 || !drawShapeRef.current) return;
-    const api = apiRef.current;
-    const els: any[] = api?.getSceneElements?.() ?? [];
-    const st = api?.getAppState?.() ?? {};
-    const zoom = typeof st?.zoom === "number" ? st.zoom : (st?.zoom?.value ?? 1) || 1;
-    const style = {
-      strokeColor: st?.currentItemStrokeColor ?? "#1e1e1e",
-      backgroundColor: st?.currentItemBackgroundColor ?? "transparent",
-      fillStyle: st?.currentItemFillStyle ?? "solid",
-      strokeWidth: st?.currentItemStrokeWidth ?? 2,
-      roughness: st?.currentItemRoughness ?? 1,
-      opacity: st?.currentItemOpacity ?? 100,
-      startArrowhead: st?.currentItemStartArrowhead ?? null,
-      endArrowhead: st?.currentItemEndArrowhead ?? "arrow",
-    };
-    const byId = new Map<string, any>(els.map((e: any) => [e?.id, e]));
-    const next = [...els];
-    let changed = false;
-    for (const id of ids) {
-      const e = byId.get(id);
-      if (!e || e.type !== "freedraw" || e.isDeleted) continue;
-      const rec = recognizeShape(absolutePoints(e), zoom);
-      if (rec.type === "freedraw") continue;
-      const [bx0, by0, bx1, by1] = rec.boundingBox;
-      const frameId =
-        [...els]
-          .reverse()
-          .find(
-            (x: any) =>
-              x?.type === "frame" &&
-              !x?.isDeleted &&
-              typeof x.x === "number" &&
-              typeof x.y === "number" &&
-              x.x <= bx0 &&
-              x.y <= by0 &&
-              x.x + (x.width ?? 0) >= bx1 &&
-              x.y + (x.height ?? 0) >= by1,
-          )?.id ?? null;
-      const partial = buildRecognizedElement(rec, { ...style, frameId });
-      const idx = next.findIndex((x: any) => x?.id === id);
-      if (idx < 0) continue;
-      try {
-        const [fixed] = restoreElements([{ ...partial, id, version: (e.version ?? 0) + 1 }] as any, null) as any[];
-        if (!fixed) continue;
-        next[idx] = fixed;
-        changed = true;
-      } catch {
-        /* keep the original stroke */
-      }
-    }
-    if (!changed) return;
-    try {
-      api?.updateScene?.({ elements: next });
-    } catch {
-      /* ignore — strokes stay as drawn */
-    }
-  }, []);
-
-  /** Bucket fill: canvas press with the tool armed -> flood the enclosed area. */
+  /** Bucket fill: exact vector hit first, raster flood as fallback. */
   const runBucketFill = useCallback(
     async (sx: number, sy: number) => {
       const api = apiRef.current;
       const els: any[] = (api?.getSceneElements?.() ?? []).filter((e: any) => !e?.isDeleted);
+      let color = "#12b886";
+      try {
+        const c = String(api?.getAppState?.()?.currentItemBackgroundColor ?? "");
+        if (c && c.toLowerCase() !== "transparent") color = c;
+      } catch {
+        /* ignore */
+      }
+      // Fast path: click inside a real closed shape -> restyle it in place.
+      const owner = findFillOwner(els, { x: sx, y: sy });
+      if (owner) {
+        try {
+          api?.updateScene?.({
+            elements: els.map((e: any) =>
+              e?.id === owner.id
+                ? {
+                    ...e,
+                    backgroundColor: color,
+                    fillStyle: "solid",
+                    version: (e.version ?? 0) + 1,
+                    versionNonce: (Math.random() * 2147483647) | 0,
+                  }
+                : e,
+            ),
+          });
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
+      // Fallback: region across open strokes -> raster flood + trace.
       const files = active?.data.files ?? {};
       let poly: { x: number; y: number }[] | null = null;
       try {
@@ -738,13 +648,6 @@ export default function App() {
       if (!poly) {
         showToast("No enclosed area there — close the gap and try again");
         return;
-      }
-      let color = "#12b886";
-      try {
-        const c = String(api?.getAppState?.()?.currentItemBackgroundColor ?? "");
-        if (c && c.toLowerCase() !== "transparent") color = c;
-      } catch {
-        /* ignore */
       }
       const xs = poly.map((p) => p.x);
       const ys = poly.map((p) => p.y);
@@ -821,8 +724,6 @@ export default function App() {
   const handleEditorPointerDown = useCallback(
     (tool: any, state: any) => {
       flushConstantBrush();
-      // A new press means any in-flight stroke is over: convert it now.
-      if (pendingStrokeRef.current.size > 0 && drawShapeRef.current) scheduleConvert(250);
       if (!bucketRef.current || presenting) return;
       const t = String(tool?.type ?? "");
       if (t !== "selection" && t !== "freedraw" && t !== "eraser") return;
@@ -832,13 +733,8 @@ export default function App() {
       if (typeof ox !== "number" || typeof oy !== "number") return;
       void runBucketFill(ox, oy);
     },
-    [presenting, runBucketFill, scheduleConvert],
+    [presenting, runBucketFill],
   );
-
-  /** Stroke ended: convert queued draw-to-shape strokes promptly. */
-  const handleEditorPointerUp = useCallback(() => {
-    if (pendingStrokeRef.current.size > 0 && drawShapeRef.current) scheduleConvert(300);
-  }, [scheduleConvert]);
 
   const flushConstantBrush = useCallback(() => {
     if (!constantBrushRef.current) return;
@@ -883,14 +779,6 @@ export default function App() {
         s.data.appState?.viewBackgroundColor,
       );
       flattenedRef.current = new Set();
-      seenStrokeRef.current = new Set(
-        (s.data.elements ?? []).filter((e: any) => e?.type === "freedraw" && e?.id).map((e: any) => e.id),
-      );
-      pendingStrokeRef.current.clear();
-      if (strokeTimer.current) {
-        window.clearTimeout(strokeTimer.current);
-        strokeTimer.current = null;
-      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeIdSafe]);
@@ -1148,8 +1036,8 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [presenting, presentIdx, frames, activeIdSafe]);
 
-  // Shape-tool shortcuts: B arms/cycles bucket, Shift+X toggles draw-to-shape,
-  // Esc disarms. Skipped while typing, editing text, presenting, or in dialogs.
+  // Shape-tool shortcuts: B arms/cycles bucket, Esc disarms. Skipped while
+  // typing, editing text, presenting, or in dialogs.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
@@ -1172,14 +1060,11 @@ export default function App() {
         e.preventDefault();
         if (bucketRef.current) cycleBucketColor();
         else setBucket(true);
-      } else if (e.shiftKey && (e.key === "x" || e.key === "X")) {
-        e.preventDefault();
-        setDrawShape(!drawShapeRef.current);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [aiOpen, dashOpen, aiSettingsOpen, helpOpen, menuOpen, presenting, setBucket, setDrawShape, cycleBucketColor]);
+  }, [aiOpen, dashOpen, aiSettingsOpen, helpOpen, menuOpen, presenting, setBucket, cycleBucketColor]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1390,7 +1275,7 @@ export default function App() {
 
         <div className="canvas-zone">
           {active && (
-            <div className={`excalidraw-host${bucketOn ? " bucket-armed" : ""}${drawShapeOn ? " shape-armed" : ""}`} key={active.id}>
+            <div className={`excalidraw-host${bucketOn ? " bucket-armed" : ""}`} key={active.id}>
               <Excalidraw
                 initialData={{
                   elements: active.data.elements,
@@ -1401,28 +1286,17 @@ export default function App() {
                 onChange={handleChange}
                 onLibraryChange={handleLibraryChange}
                 onPointerDown={handleEditorPointerDown}
-                onPointerUp={handleEditorPointerUp}
                 renderTopRightUI={(isMobile) => {
                   if (isMobile) return null;
                   return (
-                    <>
-                      <button
-                        className={`tbtn${drawShapeOn ? " on" : ""}`}
-                        onClick={() => setDrawShape(!drawShapeRef.current)}
-                        title="Draw to shape: strokes become clean shapes (Shift+X)"
-                        aria-pressed={drawShapeOn}
-                      >
-                        <Shapes size={16} />
-                      </button>
-                      <button
-                        className={`tbtn${bucketOn ? " on" : ""}`}
-                        onClick={() => setBucket(!bucketRef.current)}
-                        title="Bucket fill: click an enclosed area (B cycles color, Esc stops)"
-                        aria-pressed={bucketOn}
-                      >
-                        <PaintBucket size={16} />
-                      </button>
-                    </>
+                    <button
+                      className={`tbtn${bucketOn ? " on" : ""}`}
+                      onClick={() => setBucket(!bucketRef.current)}
+                      title="Bucket fill: click an enclosed area (B cycles color, Esc stops)"
+                      aria-pressed={bucketOn}
+                    >
+                      <PaintBucket size={16} />
+                    </button>
                   );
                 }}
                 theme={flavor === "latte" ? "light" : "dark"}

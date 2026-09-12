@@ -1,26 +1,24 @@
-// Shape tools for Neattttty: Draw-to-shape recognition + bucket flood fill.
+// Shape tools for Neattttty: bucket fill.
 //
-// The official npm package is frozen at 0.18.1, which predates upstream's
-// bucket fill (#11799) and draw-to-shape (#9313, "autoshape").
-//   - Draw-to-shape recognition is ported nearly verbatim from upstream's
-//     `packages/element/src/convertToShape.ts` (MIT (c) Excalidraw team):
-//     moment-based features (PCA elongation/skew/kurtosis, hull fill,
-//     corner-turn share, shaft deviation) matched against shape prototypes.
-//     Triangle extras, element construction, and all editor wiring are ours.
-//   - Bucket fill keeps our rasterize -> flood -> vectorize pipeline (the
-//     upstream planar-arrangement engine is woven into monorepo internals
-//     that don't exist in 0.18.1), with upstream's tolerances (6px gap
-//     bridging, tiny min-area) applied.
+// Bucket fill works in two layers:
+//   1. Vector fast path (exact): the click is tested against real shape
+//      geometry, topmost first. A hit inside a closed shape restyles it in
+//      place — no pixels, no tracing, nothing to go wrong. This covers the
+//      overwhelmingly common case (click a shape, it fills).
+//   2. Raster fallback: for regions formed by several open strokes, the
+//      scene is rasterized, flood-filled from the click, and the boundary
+//      traced back to a polygon (marching squares + longest loop).
+//
+// Tolerances (6px gap bridging, tiny min-area) follow upstream's bucket
+// fill (#11799, MIT (c) Excalidraw team); the pipeline here is original.
 
 import { exportToSvg } from "@excalidraw/excalidraw";
-import { uid } from "./scenes";
 
 export interface Pt {
   x: number;
   y: number;
 }
 
-export const DRAW_SHAPE_KEY = "neattttty.drawshape.v1";
 export const BUCKET_KEY = "neattttty.bucket.v1";
 
 /** Upstream-style quick palette cycled with B (no transparent on purpose). */
@@ -37,23 +35,13 @@ export const BUCKET_COLORS = [
   "#ffffff",
 ];
 
-function dist(a: Pt, b: Pt): number {
-  return Math.hypot(a.x - b.x, a.y - b.y);
-}
-
-function pathLength(pts: Pt[]): number {
-  let L = 0;
-  for (let i = 1; i < pts.length; i++) L += dist(pts[i - 1], pts[i]);
-  return L;
-}
-
 /** Ramer-Douglas-Peucker corner simplification. */
 export function rdp(pts: Pt[], eps: number): Pt[] {
   const perp = (p: Pt, a: Pt, b: Pt): number => {
     const dx = b.x - a.x;
     const dy = b.y - a.y;
     const len = Math.hypot(dx, dy);
-    if (len === 0) return dist(p, a);
+    if (len === 0) return Math.hypot(p.x - a.x, p.y - a.y);
     return Math.abs(dy * p.x - dx * p.y + b.x * a.y - b.y * a.x) / len;
   };
   if (pts.length <= 2) return [...pts];
@@ -77,503 +65,91 @@ export function rdp(pts: Pt[], eps: number): Pt[] {
 }
 
 // -----------------------------------------------------------------------------
-// Upstream-ported shape recognition (moment-based, after convertToShape.ts).
+// Vector fast path: point-in-closed-shape owner test.
 // -----------------------------------------------------------------------------
 
-export type RecognizedKind = "rectangle" | "diamond" | "ellipse" | "arrow" | "line" | "triangle" | "freedraw";
+const FILLABLE = new Set(["rectangle", "ellipse", "diamond", "freedraw", "line"]);
 
-export interface ShapeRecognition {
-  type: RecognizedKind;
-  points: Pt[];
-  /** [minX, minY, maxX, maxY] in the points' own coordinate frame. */
-  boundingBox: [number, number, number, number];
+function strokePad(e: any): number {
+  return (typeof e?.strokeWidth === "number" ? e.strokeWidth : 2) / 2 + 2;
 }
 
-const RESAMPLE_N = 64;
-const RECOGNITION_MIN_SCREEN_SIZE = 25;
-const CLOSED_GAP_MAX_RATIO = 0.15;
-const LINEAR_MAX_ELONGATION = 0.25;
-const ARROWHEAD_ZONE_RATIO = 0.5;
-const LINEAR_MAX_SHAFT_DEVIATION = 0.15;
-const ARROW_MIN_SKEW = 0.3;
-const CLOSED_SHAPE_MAX_DISTANCE = 1.5;
-const TURN_WINDOW = 3;
-const HULL_FILL_RATIO_TOLERANCE = 0.2;
-const CORNER_TURN_SHARE_TOLERANCE = 0.2;
-const KURTOSIS_PRODUCT_TOLERANCE = 0.7;
-
-const CLOSED_SHAPE_PROTOTYPES = [
-  { type: "rectangle", hullFillRatio: 1, cornerTurnShare: 0.95, kurtosisProduct: 1.83 },
-  { type: "diamond", hullFillRatio: 0.5, cornerTurnShare: 0.95, kurtosisProduct: 3.24 },
-  { type: "ellipse", hullFillRatio: Math.PI / 4, cornerTurnShare: 0.55, kurtosisProduct: 2.25 },
-] as const;
-
-function resampleUpstream(pts: Pt[], n: number): Pt[] {
-  let totalLen = 0;
-  for (let i = 1; i < pts.length; i++) totalLen += dist(pts[i], pts[i - 1]);
-  const interval = totalLen / (n - 1);
-  let accumulated = 0;
-  const result: Pt[] = [{ ...pts[0] }];
-  let prev = pts[0];
-  for (let i = 1; i < pts.length && result.length < n; i++) {
-    const curr = pts[i];
-    const segLen = dist(curr, prev);
-    if (accumulated + segLen >= interval) {
-      let remaining = interval - accumulated;
-      while (remaining <= segLen + 1e-10) {
-        const t = segLen === 0 ? 0 : remaining / segLen;
-        const p = { x: prev.x + t * (curr.x - prev.x), y: prev.y + t * (curr.y - prev.y) };
-        result.push(p);
-        if (result.length === n) return result;
-        prev = p;
-        accumulated = 0;
-        remaining += interval;
-      }
-      accumulated = segLen - (remaining - interval);
-    } else {
-      accumulated += segLen;
-    }
-    prev = curr;
-  }
-  while (result.length < n) result.push({ ...pts[pts.length - 1] });
-  return result;
-}
-
-function getBoundsFromPoints(pts: Pt[]): [number, number, number, number] {
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-  for (const p of pts) {
-    minX = Math.min(minX, p.x);
-    minY = Math.min(minY, p.y);
-    maxX = Math.max(maxX, p.x);
-    maxY = Math.max(maxY, p.y);
-  }
-  return [minX, minY, maxX, maxY];
-}
-
-function distToSegment(p: Pt, a: Pt, b: Pt): number {
-  const dx = b.x - a.x;
-  const dy = b.y - a.y;
-  const len2 = dx * dx + dy * dy;
-  if (len2 === 0) return dist(p, a);
-  let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2;
-  t = Math.max(0, Math.min(1, t));
-  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
-}
-
-function convexHull(pts: Pt[]): Pt[] {
-  const sorted = [...pts].sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
-  if (sorted.length <= 1) return sorted;
-  const cross = (o: Pt, a: Pt, b: Pt) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
-  const lower: Pt[] = [];
-  for (const p of sorted) {
-    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
-    lower.push(p);
-  }
-  const upper: Pt[] = [];
-  for (let i = sorted.length - 1; i >= 0; i--) {
-    const p = sorted[i];
-    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
-    upper.push(p);
-  }
-  lower.pop();
-  upper.pop();
-  return [...lower, ...upper];
-}
-
-function polygonAreaAbs(pts: Pt[]): number {
-  let a = 0;
-  for (let i = 0; i < pts.length; i++) {
-    const p = pts[i];
-    const q = pts[(i + 1) % pts.length];
-    a += p.x * q.y - q.x * p.y;
-  }
-  return Math.abs(a / 2);
-}
-
-/** 2x2 PCA: principal (major, minor) axes + eigenvalues, largest first. */
-function principalAxes(pts: Pt[]): { major: Pt; minor: Pt; l1: number; l2: number } {
-  const n = pts.length;
-  let mx = 0;
-  let my = 0;
-  for (const p of pts) {
-    mx += p.x;
-    my += p.y;
-  }
-  mx /= n;
-  my /= n;
-  let sxx = 0;
-  let syy = 0;
-  let sxy = 0;
-  for (const p of pts) {
-    const dx = p.x - mx;
-    const dy = p.y - my;
-    sxx += dx * dx;
-    syy += dy * dy;
-    sxy += dx * dy;
-  }
-  sxx /= n;
-  syy /= n;
-  sxy /= n;
-  const trace = sxx + syy;
-  const det = sxx * syy - sxy * sxy;
-  const disc = Math.sqrt(Math.max(0, (trace / 2) * (trace / 2) - det));
-  const l1 = trace / 2 + disc;
-  const l2 = Math.max(0, trace / 2 - disc);
-  let major: Pt;
-  if (Math.abs(sxy) < 1e-12) {
-    major = sxx >= syy ? { x: 1, y: 0 } : { x: 0, y: 1 };
-  } else {
-    major = { x: sxy, y: l1 - sxx };
-    const len = Math.hypot(major.x, major.y) || 1;
-    major = { x: major.x / len, y: major.y / len };
-  }
-  return { major, minor: { x: -major.y, y: major.x }, l1, l2 };
-}
-
-function moment(values: number[], order: 2 | 3 | 4): number {
-  const n = values.length;
-  if (n === 0) return 0;
-  const mean = values.reduce((s, v) => s + v, 0) / n;
-  let m2 = 0;
-  let mk = 0;
-  for (const v of values) {
-    const d = v - mean;
-    m2 += d * d;
-    mk += Math.pow(d, order);
-  }
-  m2 /= n;
-  mk /= n;
-  if (m2 <= 0) return 0;
-  return order === 2 ? m2 : mk / Math.pow(m2, order / 2);
-}
-
-interface StrokeFeatures {
-  gapRatio: number;
-  elongation: number;
-  majorSkew: number;
-  hullFillRatio: number;
-  cornerTurnShare: number;
-  kurtosisProduct: number;
-  shaftDeviationRatio: number;
-}
-
-function shaftDeviationRatio(pts: Pt[]): number {
-  const start = pts[0];
-  let tip = start;
-  let tipDistance = 0;
-  for (const p of pts) {
-    const d = dist(p, start);
-    if (d > tipDistance) {
-      tipDistance = d;
-      tip = p;
+/** Even-odd ray cast for closed polylines (absolute coords). */
+function pointInLoop(p: Pt, pts: Pt[]): boolean {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const a = pts[i];
+    const b = pts[j];
+    if (a.y > p.y !== b.y > p.y && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) {
+      inside = !inside;
     }
   }
-  if (tipDistance === 0) return 0;
-  let maxDev = 0;
-  for (const p of pts) {
-    if (dist(p, tip) <= ARROWHEAD_ZONE_RATIO * tipDistance) continue;
-    maxDev = Math.max(maxDev, distToSegment(p, start, tip));
-  }
-  return maxDev / tipDistance;
+  return inside;
 }
 
-function windowedTurns(pts: Pt[]): number[] {
-  const turns: number[] = [];
-  for (let i = TURN_WINDOW; i < pts.length - TURN_WINDOW; i++) {
-    const a = pts[i - TURN_WINDOW];
-    const b = pts[i];
-    const c = pts[i + TURN_WINDOW];
-    const v1x = b.x - a.x;
-    const v1y = b.y - a.y;
-    const v2x = c.x - b.x;
-    const v2y = c.y - b.y;
-    turns.push(Math.abs(Math.atan2(v1x * v2y - v1y * v2x, v1x * v2x + v1y * v2y)));
-  }
-  return turns;
-}
-
-function cornerTurnShare(pts: Pt[]): number {
-  const turns = windowedTurns(pts);
-  const total = turns.reduce((s, t) => s + t, 0);
-  if (total === 0) return 0;
-  const taken = new Array<boolean>(turns.length).fill(false);
-  let top4 = 0;
-  for (let c = 0; c < 4; c++) {
-    let peak = -1;
-    let peakTurn = 0;
-    for (let i = 0; i < turns.length; i++) {
-      if (!taken[i] && turns[i] > peakTurn) {
-        peakTurn = turns[i];
-        peak = i;
-      }
-    }
-    if (peak < 0) break;
-    for (let i = peak - TURN_WINDOW; i <= peak + TURN_WINDOW; i++) {
-      if (i >= 0 && i < turns.length && !taken[i]) {
-        top4 += turns[i];
-        taken[i] = true;
-      }
-    }
-  }
-  return top4 / total;
-}
-
-function extractFeatures(points: Pt[]): StrokeFeatures {
-  const pts = resampleUpstream(points, RESAMPLE_N);
-  let path = 0;
-  for (let i = 1; i < pts.length; i++) path += dist(pts[i], pts[i - 1]);
-  const gap = dist(pts[pts.length - 1], pts[0]);
-  const { major, l1, l2 } = principalAxes(pts);
-  // Orient the major axis so skew is <= 0 by construction (upstream).
-  let mx = major.x;
-  let my = major.y;
-  const proj0 = pts.map((p) => p.x * mx + p.y * my);
-  const skew0 = moment(proj0, 3);
-  if (skew0 > 0) {
-    mx = -mx;
-    my = -my;
-  }
-  const proj = pts.map((p) => p.x * mx + p.y * my);
-  const hull = convexHull(pts);
-  const [minX, minY, maxX, maxY] = getBoundsFromPoints(pts);
-  const boxArea = (maxX - minX) * (maxY - minY);
-  return {
-    gapRatio: path > 0 ? gap / path : 0,
-    elongation: l1 > 0 ? Math.sqrt(Math.max(0, l2 / l1)) : 0,
-    majorSkew: moment(proj, 3),
-    hullFillRatio: boxArea > 0 ? polygonAreaAbs(hull) / boxArea : 0,
-    cornerTurnShare: cornerTurnShare(pts),
-    kurtosisProduct:
-      moment(
-        pts.map((p) => p.x),
-        4,
-      ) *
-      moment(
-        pts.map((p) => p.y),
-        4,
-      ),
-    shaftDeviationRatio: shaftDeviationRatio(pts),
-  };
-}
-
-type ClosedKind = "rectangle" | "diamond" | "ellipse";
-
-function classifyClosedStroke(f: StrokeFeatures): ClosedKind | "freedraw" {
-  let best: ClosedKind | "freedraw" = "freedraw";
-  let bestDistance = CLOSED_SHAPE_MAX_DISTANCE;
-  for (const p of CLOSED_SHAPE_PROTOTYPES) {
-    const distance = Math.hypot(
-      (f.hullFillRatio - p.hullFillRatio) / HULL_FILL_RATIO_TOLERANCE,
-      (f.cornerTurnShare - p.cornerTurnShare) / CORNER_TURN_SHARE_TOLERANCE,
-      (f.kurtosisProduct - p.kurtosisProduct) / KURTOSIS_PRODUCT_TOLERANCE,
-    );
-    if (distance < bestDistance) {
-      bestDistance = distance;
-      best = p.type;
-    }
-  }
-  return best;
-}
-
-function classifyOpenStroke(f: StrokeFeatures): "arrow" | "line" | "freedraw" {
-  if (f.elongation > LINEAR_MAX_ELONGATION || f.shaftDeviationRatio > LINEAR_MAX_SHAFT_DEVIATION) {
-    return "freedraw";
-  }
-  return Math.abs(f.majorSkew) >= ARROW_MIN_SKEW ? "arrow" : "line";
-}
-
-/** Upstream supplement: triangles have no prototype, detect via 3 corners. */
-function isTriangleStroke(pts: Pt[], pathLen: number): boolean {
-  const diag = Math.hypot(
-    Math.max(...pts.map((p) => p.x)) - Math.min(...pts.map((p) => p.x)),
-    Math.max(...pts.map((p) => p.y)) - Math.min(...pts.map((p) => p.y)),
-  );
-  for (const k of [1, 2]) {
-    const corners = rdp(pts, Math.max(2.5, 0.022 * diag * k));
-    const verts =
-      corners.length > 2 && dist(corners[0], corners[corners.length - 1]) < 0.03 * pathLen
-        ? corners.slice(0, -1)
-        : corners;
-    if (verts.length === 3) return true;
-  }
-  return false;
-}
-
-/**
- * Recognize a freehand stroke (absolute scene coords). Returns the shape
- * type plus the original points and bbox for element construction.
- */
-export function recognizeShape(points: Pt[], zoom = 1): ShapeRecognition {
-  const boundingBox = getBoundsFromPoints(points);
-  const [minX, minY, maxX, maxY] = boundingBox;
-  const maxDim = Math.max(maxX - minX, maxY - minY);
-  if (points.length < 3 || maxDim * zoom < RECOGNITION_MIN_SCREEN_SIZE) {
-    return { type: "freedraw", points, boundingBox };
-  }
-  const features = extractFeatures(points);
-  let type: RecognizedKind =
-    features.gapRatio > CLOSED_GAP_MAX_RATIO
-      ? classifyOpenStroke(features)
-      : classifyClosedStroke(features);
-  if (type === "freedraw" && features.gapRatio <= CLOSED_GAP_MAX_RATIO) {
-    let path = 0;
-    for (let i = 1; i < points.length; i++) path += dist(points[i], points[i - 1]);
-    if (isTriangleStroke(points, path)) type = "triangle";
-  }
-  return { type, points, boundingBox };
-}
-
-/** Arrow tip = bbox-perimeter point farthest from the drawn start. */
-function getArrowEndpoint(points: Pt[], boundingBox: [number, number, number, number], start: Pt): Pt {
-  const [minX, minY, maxX, maxY] = boundingBox;
-  const w = maxX - minX;
-  const h = maxY - minY;
-  if (w === 0 && h === 0) return points[points.length - 1];
-  const perimeter: Pt[] = [
-    { x: minX, y: minY },
-    { x: (minX + maxX) / 2, y: minY },
-    { x: maxX, y: minY },
-    { x: maxX, y: (minY + maxY) / 2 },
-    { x: maxX, y: maxY },
-    { x: (minX + maxX) / 2, y: maxY },
-    { x: minX, y: maxY },
-    { x: minX, y: (minY + maxY) / 2 },
-  ];
-  let ideal = { x: maxX, y: maxY };
-  let idealDist = -1;
-  for (const pp of perimeter) {
-    const d = dist(pp, start);
-    if (d > idealDist) {
-      idealDist = d;
-      ideal = pp;
-    }
-  }
-  let best = points[points.length - 1];
-  let bestDist = Infinity;
-  for (const pt of points) {
-    const d = dist(pt, ideal);
-    if (d < bestDist) {
-      bestDist = d;
-      best = pt;
-    }
-  }
-  return best;
-}
-
-export interface ShapeStyle {
-  strokeColor: string;
-  backgroundColor: string;
-  fillStyle: string;
-  strokeWidth: number;
-  roughness: number;
-  opacity: number;
-  startArrowhead?: string | null;
-  endArrowhead?: string | null;
-  frameId?: string | null;
-}
-
-/**
- * Build a clean element partial from a recognition result. Lines/arrows are
- * normalized to positive width/height; triangles (no native type) become
- * closed freedraw polygons.
- */
-export function buildRecognizedElement(rec: ShapeRecognition, style: ShapeStyle): any {
-  const [minX, minY, maxX, maxY] = rec.boundingBox;
-  const w = Math.max(2, maxX - minX);
-  const h = Math.max(2, maxY - minY);
-  const base = {
-    id: uid(),
-    x: minX,
-    y: minY,
-    width: w,
-    height: h,
-    angle: 0,
-    strokeColor: style.strokeColor,
-    backgroundColor: style.backgroundColor,
-    fillStyle: style.fillStyle,
-    strokeWidth: style.strokeWidth,
-    roughness: style.roughness,
-    opacity: style.opacity,
-    groupIds: [],
-    frameId: style.frameId ?? null,
-    boundElements: [],
-    link: null,
-    locked: false,
-  };
-  if (rec.type === "triangle") {
-    return {
-      ...base,
-      type: "freedraw",
-      points: [
-        [w / 2, 0],
-        [w, h],
-        [0, h],
-        [w / 2, 0],
-      ],
-      simulatePressure: false,
-    };
-  }
-  if (rec.type === "line" || rec.type === "arrow") {
-    const p0 = rec.points[0];
-    let p1 = rec.points[rec.points.length - 1];
-    if (rec.type === "arrow") {
-      p1 = getArrowEndpoint(rec.points, rec.boundingBox, p0);
-      const len = dist(p0, p1);
-      if (len < 60) {
-        // short arrow-looking scribble: plain line instead (upstream rule)
-        const lx = Math.min(p0.x, p1.x);
-        const ly = Math.min(p0.y, p1.y);
-        return {
-          ...base,
-          type: "line",
-          x: lx,
-          y: ly,
-          width: Math.max(2, Math.abs(p1.x - p0.x)),
-          height: Math.max(2, Math.abs(p1.y - p0.y)),
-          points: [
-            [p0.x - lx, p0.y - ly],
-            [p1.x - lx, p1.y - ly],
-          ],
-          startBinding: null,
-          endBinding: null,
-        };
-      }
-    }
-    const lx = Math.min(p0.x, p1.x);
-    const ly = Math.min(p0.y, p1.y);
-    return {
-      ...base,
-      type: rec.type,
-      x: lx,
-      y: ly,
-      width: Math.max(2, Math.abs(p1.x - p0.x)),
-      height: Math.max(2, Math.abs(p1.y - p0.y)),
-      points: [
-        [p0.x - lx, p0.y - ly],
-        [p1.x - lx, p1.y - ly],
-      ],
-      startBinding: null,
-      endBinding: null,
-      startArrowhead: rec.type === "arrow" ? (style.startArrowhead ?? null) : undefined,
-      endArrowhead: rec.type === "arrow" ? (style.endArrowhead ?? "arrow") : undefined,
-    };
-  }
-  return { ...base, type: rec.type };
-}
-
-// -----------------------------------------------------------------------------
-// Bucket fill: rasterize -> flood fill -> vectorize to polygon.
-// -----------------------------------------------------------------------------
-
-/** Absolute scene coords of a freedraw/linear element's points. */
-export function absolutePoints(e: any): Pt[] {
+function absoluteLoop(e: any): Pt[] | null {
+  const raw = e?.points as number[][] | undefined;
+  if (!Array.isArray(raw) || raw.length < 3) return null;
   const ox = typeof e?.x === "number" ? e.x : 0;
   const oy = typeof e?.y === "number" ? e.y : 0;
-  return ((e?.points ?? []) as number[][]).map((p) => ({ x: ox + p[0], y: oy + p[1] }));
+  const pts = raw.map((q) => ({ x: ox + q[0], y: oy + q[1] }));
+  // Closed loop: ends meet (within a few px or a small fraction of length).
+  let len = 0;
+  for (let i = 1; i < pts.length; i++) len += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+  if (Math.hypot(pts[0].x - pts[pts.length - 1].x, pts[0].y - pts[pts.length - 1].y) > Math.max(8, 0.05 * len)) {
+    return null;
+  }
+  return pts;
 }
+
+/**
+ * Exact point-in-closed-shape test. Only unrotated shapes qualify (angle
+ * must be unset/0) — rotated ones fall through to the raster fallback.
+ */
+function pointInClosedShape(e: any, p: Pt): boolean {
+  if (!e || e.isDeleted || e.locked || (e.opacity ?? 100) <= 0) return false;
+  if (!FILLABLE.has(e.type)) return false;
+  if (e.angle) return false;
+  if (typeof e.x !== "number" || typeof e.y !== "number") return false;
+  const pad = strokePad(e);
+  if (e.type === "rectangle") {
+    const w = e.width ?? 0;
+    const h = e.height ?? 0;
+    return p.x >= e.x - pad && p.x <= e.x + w + pad && p.y >= e.y - pad && p.y <= e.y + h + pad;
+  }
+  if (e.type === "ellipse") {
+    const rx = (e.width ?? 0) / 2 + pad;
+    const ry = (e.height ?? 0) / 2 + pad;
+    if (!(rx > 0) || !(ry > 0)) return false;
+    const dx = (p.x - (e.x + (e.width ?? 0) / 2)) / rx;
+    const dy = (p.y - (e.y + (e.height ?? 0) / 2)) / ry;
+    return dx * dx + dy * dy <= 1;
+  }
+  if (e.type === "diamond") {
+    const hw = (e.width ?? 0) / 2 + pad;
+    const hh = (e.height ?? 0) / 2 + pad;
+    if (!(hw > 0) || !(hh > 0)) return false;
+    const dx = Math.abs(p.x - (e.x + (e.width ?? 0) / 2)) / hw;
+    const dy = Math.abs(p.y - (e.y + (e.height ?? 0) / 2)) / hh;
+    return dx + dy <= 1;
+  }
+  // freedraw / line: closed loop only.
+  const loop = absoluteLoop(e);
+  return loop !== null && pointInLoop(p, loop);
+}
+
+/** Topmost closed shape under the point, or null. */
+export function findFillOwner(elements: any[], p: Pt): any | null {
+  for (let i = elements.length - 1; i >= 0; i--) {
+    const e = elements[i];
+    if (e && pointInClosedShape(e, p)) return e;
+  }
+  return null;
+}
+
+// -----------------------------------------------------------------------------
+// Raster fallback: rasterize -> flood fill -> vectorize to polygon.
+// -----------------------------------------------------------------------------
 
 interface Raster {
   data: Uint8ClampedArray;
@@ -638,7 +214,7 @@ export async function floodRegion(elements: any[], files: any, click: Pt): Promi
   if (sx < 0 || sy < 0 || sx >= w || sy >= h) return null;
 
   // Barriers = drawn pixels (anything clearly off-white), dilated 1px to
-  // close hairline gaps in hand-drawn strokes (upstream bridges ~6 scene px).
+  // close hairline gaps in hand-drawn strokes.
   const bar = new Uint8Array(w * h);
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
@@ -660,8 +236,8 @@ export async function floodRegion(elements: any[], files: any, click: Pt): Promi
   }
   if (dil[sy * w + sx]) return null; // clicked straight onto ink
 
-  // 4-way flood. Caps are relative to the raster: tiny regions are fine
-  // (upstream min-area is ~4 scene px²), only canvas-filling floods abort.
+  // 4-way flood. Caps are relative: tiny regions are fine, only
+  // canvas-filling floods abort.
   const seen = new Uint8Array(w * h);
   const stack: number[] = [sy * w + sx];
   seen[sy * w + sx] = 1;
@@ -694,7 +270,7 @@ export async function floodRegion(elements: any[], files: any, click: Pt): Promi
   if (touchedEdge || count < 64) return null;
 
   // Marching squares on the filled mask -> longest loop wins (islands get
-  // painted over, matching upstream's pre-hole-support behavior).
+  // painted over).
   const contour = traceContour(seen, w, h);
   if (contour.length < 8) return null;
   let cArea2 = 0;
