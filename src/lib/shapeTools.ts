@@ -138,7 +138,7 @@ export function recognizeStroke(abs: Pt[]): Recognized | null {
   const pts = resample(abs, 64);
   const L = pathLength(pts);
   if (L < 30) return null;
-  const closed = dist(pts[0], pts[pts.length - 1]) < 0.14 * L;
+  const closed = dist(pts[0], pts[pts.length - 1]) < 0.16 * L;
 
   if (!closed) {
     // Straight open stroke -> line (needs length along >> across).
@@ -150,15 +150,35 @@ export function recognizeStroke(abs: Pt[]): Recognized | null {
   }
 
   const diag = Math.hypot(w, h);
-  const corners = rdp(pts, Math.max(2.5, 0.022 * diag));
-  // Drop the duplicated closure point if present.
-  const verts =
-    corners.length > 2 && dist(corners[0], corners[corners.length - 1]) < 0.03 * L
-      ? corners.slice(0, -1)
-      : corners;
+  // Corner passes, coarse last: sloppy hand corners (overshoot, rounded)
+  // RDP to 5-8 vertices at fine epsilons but collapse to 3-4 when coarse.
+  for (const k of [1, 2, 3.2]) {
+    const corners = rdp(pts, Math.max(2.5, 0.022 * diag * k));
+    const verts =
+      corners.length > 2 && dist(corners[0], corners[corners.length - 1]) < 0.03 * L
+        ? corners.slice(0, -1)
+        : corners;
+    if (verts.length === 3) return { kind: "triangle", box };
+    if (verts.length === 4) {
+      const angs = [0, 1, 2, 3].map((i) => angleAt(verts[i], verts[(i + 1) % 4], verts[(i + 2) % 4]));
+      const rightish = angs.filter((a) => a > 65 && a < 115).length;
+      // Diamond: vertices sit near edge midpoints (top/right/bottom/left).
+      const nx = verts.map((v) => (v.x - box.minX) / (w || 1));
+      const ny = verts.map((v) => (v.y - box.minY) / (h || 1));
+      const order = [...nx.keys()].sort((a, b) => ny[a] - ny[b]);
+      const diamondish =
+        Math.abs(nx[order[0]] - 0.5) < 0.25 &&
+        Math.abs(ny[order[0]]) < 0.25 &&
+        Math.abs(nx[order[3]] - 0.5) < 0.25 &&
+        Math.abs(ny[order[3]] - 1) < 0.25;
+      if (diamondish && rightish < 4) return { kind: "diamond", box };
+      if (rightish >= 3) return { kind: "rectangle", box };
+      // else: try a coarser pass — a rounded corner may be splitting a vertex.
+    }
+  }
 
-  // Roundness first: hand circles often RDP to 9+ vertices, so a vertex-count
-  // gate here would reject exactly the strokes users draw most.
+  // Roundness check runs independently of corner counts: hand circles often
+  // RDP to 9+ vertices, which must not disqualify them.
   let area2 = 0;
   for (let i = 0; i < pts.length; i++) {
     const a = pts[i];
@@ -166,27 +186,7 @@ export function recognizeStroke(abs: Pt[]): Recognized | null {
     area2 += a.x * b.y - b.x * a.y;
   }
   const circularity = (4 * Math.PI * Math.abs(area2 / 2)) / (L * L || 1);
-  if (verts.length <= 16 && circularity > 0.78) return { kind: "ellipse", box };
-
-  if (verts.length === 3) return { kind: "triangle", box };
-  if (verts.length === 4) {
-    const angs = [0, 1, 2, 3].map((i) => angleAt(verts[i], verts[(i + 1) % 4], verts[(i + 2) % 4]));
-    const rightish = angs.filter((a) => a > 65 && a < 115).length;
-    // Diamond: vertices sit near edge midpoints (top/right/bottom/left).
-    const nx = verts.map((v) => (v.x - box.minX) / (w || 1));
-    const ny = verts.map((v) => (v.y - box.minY) / (h || 1));
-    const order = [...nx.keys()].sort((a, b) => ny[a] - ny[b]);
-    const diamondish =
-      Math.abs(nx[order[0]] - 0.5) < 0.25 &&
-      Math.abs(ny[order[0]]) < 0.25 &&
-      Math.abs(nx[order[3]] - 0.5) < 0.25 &&
-      Math.abs(ny[order[3]] - 1) < 0.25;
-    if (diamondish && rightish < 4) return { kind: "diamond", box };
-    if (rightish >= 3) return { kind: "rectangle", box };
-    return null;
-  }
-  // Small-corner-count blobs get a second chance at ellipse with looser bar.
-  if (verts.length <= 6 && circularity > 0.65) return { kind: "ellipse", box };
+  if (circularity > 0.78) return { kind: "ellipse", box };
   return null;
 }
 

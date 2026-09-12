@@ -282,6 +282,15 @@ export default function App() {
     [showToast],
   );
 
+  /** Switch the editor's active tool (best-effort; ignores failures). */
+  const switchEditorTool = (type: string) => {
+    try {
+      (apiRef.current?.setActiveTool as any)?.({ type });
+    } catch {
+      /* ignore */
+    }
+  };
+
   const setDrawShape = useCallback(
     (on: boolean) => {
       setDrawShapeOn(on);
@@ -290,7 +299,8 @@ export default function App() {
       } catch {
         /* ignore */
       }
-      showToast(on ? "Draw to shape on — sketch with the draw tool (P)" : "Draw to shape off");
+      if (on) switchEditorTool("freedraw");
+      showToast(on ? "Draw-to-shape pen — sketch, it snaps on release" : "Draw to shape off");
     },
     [showToast],
   );
@@ -303,7 +313,8 @@ export default function App() {
       } catch {
         /* ignore */
       }
-      showToast(on ? "Bucket armed — click an enclosed area (B cycles color, Esc stops)" : "Bucket off");
+      if (on) switchEditorTool("selection");
+      showToast(on ? "Bucket tool — click an enclosed area (B color, Esc done)" : "Bucket off");
     },
     [showToast],
   );
@@ -337,17 +348,22 @@ export default function App() {
   }, []);
 
   // Freedraw tool detection: best-effort poll for tool switches
-  // onChange doesn't report. Read-only, never writes.
+  // onChange doesn't report. Read-only, never writes (except bucket disarm).
   useEffect(() => {
     const timer = window.setInterval(() => {
       try {
-        syncTool(apiRef.current?.getAppState?.()?.activeTool?.type);
+        const t = apiRef.current?.getAppState?.()?.activeTool?.type;
+        syncTool(t);
+        // Picking another drawing tool switches away from the bucket.
+        if (bucketRef.current && t && t !== "selection" && t !== "freedraw" && t !== "eraser") {
+          setBucket(false);
+        }
       } catch {
         /* editor not ready */
       }
     }, 500);
     return () => window.clearInterval(timer);
-  }, [syncTool]);
+  }, [syncTool, setBucket]);
 
   // Persist (debounced by nature of effect batching on edits)
   useEffect(() => {
@@ -762,6 +778,29 @@ export default function App() {
         );
         next.push(fixed);
         api?.updateScene?.({ elements: next });
+        // Late sweep: the click may also have started a dot stroke that only
+        // arrives via onChange after this insert — absorb it once it lands.
+        const cx = sx;
+        const cy = sy;
+        window.setTimeout(() => {
+          try {
+            const live: any[] = api?.getSceneElements?.() ?? [];
+            const swept = live.filter(
+              (el: any) =>
+                !(
+                  el?.type === "freedraw" &&
+                  (el.points?.length ?? 0) < 3 &&
+                  typeof el?.x === "number" &&
+                  typeof el?.y === "number" &&
+                  Math.abs(el.x - cx) < 40 &&
+                  Math.abs(el.y - cy) < 40
+                ),
+            );
+            if (swept.length !== live.length) api?.updateScene?.({ elements: swept });
+          } catch {
+            /* ignore */
+          }
+        }, 800);
       } catch {
         /* ignore */
       }
@@ -1343,7 +1382,7 @@ export default function App() {
 
         <div className="canvas-zone">
           {active && (
-            <div className="excalidraw-host" key={active.id}>
+            <div className={`excalidraw-host${bucketOn ? " bucket-armed" : ""}`} key={active.id}>
               <Excalidraw
                 initialData={{
                   elements: active.data.elements,
