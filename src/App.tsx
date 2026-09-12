@@ -12,6 +12,7 @@ import {
   FileText,
   FileUp,
   Folder,
+  FolderPlus,
   Image as ImageIcon,
   LayoutDashboard,
   Menu,
@@ -210,6 +211,7 @@ export default function App() {
   const activeIdRef = useRef(activeId);
   const toastTimer = useRef<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
   /** Last persisted signature per scene — breaks onChange echo loops. */
   const sceneSigRef = useRef<Record<string, string>>({});
   /** Pressure strokes already flattened to constant — never touch again. */
@@ -353,6 +355,34 @@ export default function App() {
     showToast(`Folder "${name}" created`);
   };
 
+  /** Parse files into scenes inside a folder. Skips unreadable files with a summary. */
+  const importManyFiles = async (files: File[], folderId: string): Promise<void> => {
+    const made: SceneMeta[] = [];
+    let skipped = 0;
+    for (const f of files) {
+      try {
+        const data = await parseImportedFile(f);
+        made.push({
+          id: uid(),
+          name: f.name.replace(/\.excalidraw$|\.json$/i, "") || "imported",
+          collection: folderId,
+          updatedAt: Date.now(),
+          data,
+        });
+      } catch {
+        skipped += 1;
+      }
+    }
+    if (made.length === 0) {
+      showToast("Could not read any of those files as .excalidraw JSON");
+      return;
+    }
+    setScenes((prev) => [...made, ...prev]);
+    switchScene(made[0].id);
+    showToast(
+      `Imported ${made.length} scene(s) into "${collName(folderId)}"${skipped > 0 ? `, skipped ${skipped}` : ""}`,
+    );
+  };
   /** Get-or-create a folder by name (no prompt). Returns its id. */
   const ensureCollection = (rawName: string): string => {
     const name = rawName.trim() || "Imported";
@@ -955,7 +985,15 @@ export default function App() {
           {menuOpen && (
             <div className="menu">
               <button onClick={() => fileInputRef.current?.click()}>
-                <span className="mi"><FileUp size={15} /> Open scene file</span> <small>.excalidraw</small>
+                <span className="mi"><FileUp size={15} /> Open scene file(s)</span> <small>.excalidraw</small>
+              </button>
+              <button
+                onClick={() => {
+                  setMenuOpen(false);
+                  folderInputRef.current?.click();
+                }}
+              >
+                <span className="mi"><FolderPlus size={15} /> Import folder…</span> <small>many files</small>
               </button>
               <button
                 onClick={() => {
@@ -1224,9 +1262,14 @@ export default function App() {
                 <small>on disk</small>
               </button>
               <button className="card new" onClick={() => fileInputRef.current?.click()}>
-                <span className="mi" style={{ justifyContent: "center" }}><Download size={15} /> Import file</span>
+                <span className="mi" style={{ justifyContent: "center" }}><Download size={15} /> Import files</span>
                 <br />
                 <small>.excalidraw</small>
+              </button>
+              <button className="card new" onClick={() => folderInputRef.current?.click()}>
+                <span className="mi" style={{ justifyContent: "center" }}><FolderPlus size={15} /> Import folder</span>
+                <br />
+                <small>many .excalidraw</small>
               </button>
             </div>
             {trash.length > 0 && (
@@ -1555,32 +1598,30 @@ export default function App() {
           }
           const folderName = window.prompt(`Import ${files.length} files into a new folder:`, "Imported");
           if (folderName === null) return;
-          const folderId = ensureCollection(folderName);
-          const made: SceneMeta[] = [];
-          let skipped = 0;
-          for (const f of files) {
-            try {
-              const data = await parseImportedFile(f);
-              made.push({
-                id: uid(),
-                name: f.name.replace(/\.excalidraw$|\.json$/i, "") || "imported",
-                collection: folderId,
-                updatedAt: Date.now(),
-                data,
-              });
-            } catch {
-              skipped += 1;
-            }
-          }
-          if (made.length === 0) {
-            showToast("Could not read any of those files as .excalidraw JSON");
+          await importManyFiles(files, ensureCollection(folderName));
+        }}
+      />
+      <input
+        ref={(el) => {
+          folderInputRef.current = el;
+          // Not in React's input prop types — set directly. Works in Chromium/WebView2.
+          if (el) el.setAttribute("webkitdirectory", "");
+        }}
+        type="file"
+        style={{ display: "none" }}
+        onChange={async (e) => {
+          const all = [...(e.target.files ?? [])];
+          e.target.value = "";
+          if (all.length === 0) return;
+          const files = all.filter((f) => /\.excalidraw$|\.json$/i.test(f.name));
+          if (files.length === 0) {
+            showToast("No .excalidraw files in that folder");
             return;
           }
-          setScenes((prev) => [...made, ...prev]);
-          switchScene(made[0].id);
-          showToast(
-            `Imported ${made.length} scene(s) into "${collName(folderId)}"${skipped > 0 ? `, skipped ${skipped}` : ""}`,
-          );
+          const topDir = (all[0].webkitRelativePath || "").split("/")[0] || "Imported";
+          const folderName = window.prompt(`Import ${files.length} file(s) into a new folder:`, topDir);
+          if (folderName === null) return;
+          await importManyFiles(files, ensureCollection(folderName));
         }}
       />
     </div>
