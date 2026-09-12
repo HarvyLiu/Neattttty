@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Excalidraw } from "@excalidraw/excalidraw";
+import { Excalidraw, MainMenu } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import {
   Bot,
@@ -8,26 +8,19 @@ import {
   ChevronRight,
   CircleHelp,
   Download,
-  FileDown,
   FileText,
   FileUp,
   Folder,
   FolderPlus,
-  ExternalLink,
-  Image as ImageIcon,
   LayoutDashboard,
-  Library,
   Menu,
   PanelLeft,
-  PanelRight,
   Pencil,
   Play,
   Plus,
   Presentation,
-  RotateCcw,
   Save,
   SendHorizontal,
-  Shapes,
   SlidersHorizontal,
   Sparkles,
   Trash2,
@@ -59,35 +52,20 @@ import {
 } from "./lib/collections";
 import ContextMenu, { type CtxItem } from "./components/ContextMenu";
 import {
-  LIBRARIES_SITE,
-  PERSONAL_ID,
-  addLibraryItems,
-  addPersonalItem,
-  centerElementsInView,
-  cloneElementsFresh,
   copyText,
-  importLibraryFile,
-  importLibraryFromUrl,
   loadLibraryStore,
-  loadLibraryUrl,
-  openExternal,
-  parseAddLibraryLink,
-  removeLibraryItem,
-  removeLibrarySource,
   saveLibraryStore,
-  saveLibraryUrl,
   sigLibrary,
   syncFromEditor,
   type LibraryStore,
 } from "./lib/libraries";
 import { AI_DEFAULTS, generateMermaid, generateWireframe, mermaidToScene, shiftScene, type AIConfig, type AIKind, type MermaidScene } from "./lib/ai";
-import { downloadPng, downloadPptx, downloadSvg, listFrames, svgForElements } from "./lib/exporters";
+import { downloadPptx, listFrames, svgForElements } from "./lib/exporters";
 
 type Flavor = "latte" | "frappe" | "macchiato" | "mocha";
 const FLAVORS: Flavor[] = ["latte", "frappe", "macchiato", "mocha"];
 
 const AI_STORE_KEY = "neattttty.ai.v1";
-const NOTES_KEY = "neattttty.notes.v1";
 const FLAVOR_KEY = "neattttty.flavor";
 const BRUSH_KEY = "neattttty.brush.v2";
 
@@ -184,9 +162,6 @@ export default function App() {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(loadCollapsed);
   const [ctx, setCtx] = useState<{ x: number; y: number; items: CtxItem[] } | null>(null);
   const [libStore, setLibStore] = useState<LibraryStore>(loadLibraryStore);
-  const [libOpen, setLibOpen] = useState(false);
-  const [libLink, setLibLink] = useState("");
-  const [libUrl, setLibUrl] = useState<string>(loadLibraryUrl);
   const libSigRef = useRef<string>(sigLibrary(libStore.items));
   const [trash, setTrash] = useState<TrashedScene[]>(() => purgeExpiredTrash(loadTrash()));
   const [activeId, setActiveId] = useState<string>(() => {
@@ -198,11 +173,6 @@ export default function App() {
     return FLAVORS.includes(f as Flavor) ? (f as Flavor) : "mocha";
   });
   const [railOpen, setRailOpen] = useState(true);
-  const [dockTab, setDockTab] = useState<"slides" | "scenes" | "library">("slides");
-  const [panelOpen, setPanelOpen] = useState(true);
-  const [nativeSidebar, setNativeSidebar] = useState(false);
-  const [selectedCount, setSelectedCount] = useState(0);
-  const [libThumbs, setLibThumbs] = useState<Record<string, string>>({});
   const [menuOpen, setMenuOpen] = useState(false);
   const [dashOpen, setDashOpen] = useState(false);
   const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
@@ -225,13 +195,6 @@ export default function App() {
   const [showCode, setShowCode] = useState(false);
   const previewSceneRef = useRef<MermaidScene | null>(null);
   const [aiCfg, setAiCfg] = useState<AIConfig>(loadAI);
-  const [notes, setNotes] = useState<Record<string, string>>(() => {
-    try {
-      return JSON.parse(localStorage.getItem(NOTES_KEY) ?? "{}") as Record<string, string>;
-    } catch {
-      return {};
-    }
-  });
   const [presenting, setPresenting] = useState(false);
   const [presentIdx, setPresentIdx] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
@@ -251,7 +214,6 @@ export default function App() {
   const toastTimer = useRef<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
-  const libInputRef = useRef<HTMLInputElement>(null);
   /** Last persisted signature per scene — breaks onChange echo loops. */
   const sceneSigRef = useRef<Record<string, string>>({});
   /** Pressure strokes already flattened to constant — never touch again. */
@@ -294,18 +256,12 @@ export default function App() {
     }
   }, []);
 
-  // Freedraw tool detection + selection count: best-effort polls for state
+  // Freedraw tool detection: best-effort poll for tool switches
   // onChange doesn't report. Read-only, never writes.
   useEffect(() => {
     const timer = window.setInterval(() => {
       try {
-        const appState = apiRef.current?.getAppState?.();
-        syncTool(appState?.activeTool?.type);
-        const sel = appState?.selectedElementIds ?? {};
-        const n = Object.keys(sel).length;
-        setSelectedCount((prev) => (prev === n ? prev : n));
-        const sb = !!appState?.openSidebar;
-        setNativeSidebar((prev) => (prev === sb ? prev : sb));
+        syncTool(apiRef.current?.getAppState?.()?.activeTool?.type);
       } catch {
         /* editor not ready */
       }
@@ -335,10 +291,6 @@ export default function App() {
     return () => window.clearTimeout(t);
   }, [libStore]);
   useEffect(() => {
-    const t = window.setTimeout(() => saveLibraryUrl(libUrl), 400);
-    return () => window.clearTimeout(t);
-  }, [libUrl]);
-  useEffect(() => {
     document.documentElement.dataset.flavor = flavor;
     try {
       localStorage.setItem(FLAVOR_KEY, flavor);
@@ -353,16 +305,6 @@ export default function App() {
       /* ignore */
     }
   }, [aiCfg]);
-  useEffect(() => {
-    const t = window.setTimeout(() => {
-      try {
-        localStorage.setItem(NOTES_KEY, JSON.stringify(notes));
-      } catch {
-        /* ignore */
-      }
-    }, 400);
-    return () => window.clearTimeout(t);
-  }, [notes]);
 
   function purgeCheck(list: SceneMeta[]): SceneMeta[] {
     return list;
@@ -409,143 +351,11 @@ export default function App() {
     showToast(`Folder "${name}" created`);
   };
 
-  /** Push items into the editor library (native panel picks them up too). */
-  const pushLibraryToEditor = (items: any[]) => {
-    try {
-      apiRef.current?.updateLibrary?.({ libraryItems: items, merge: true });
-    } catch {
-      /* panel picks them up on next mount via initialData; the store already saved */
-    }
-  };
-
-  const installLibraryItems = (name: string, kind: "file" | "link", items: any[]) => {
-    const next = addLibraryItems(libStore, name, kind, items);
-    libSigRef.current = sigLibrary(next.items);
-    setLibStore(next);
-    pushLibraryToEditor(items);
-    showToast(`Added ${items.length} item(s) to library`);
-  };
-
   const handleLibraryChange = (items: any) => {
     const [next, changed] = syncFromEditor(libStore, items);
     if (!changed) return;
     libSigRef.current = sigLibrary(next.items);
     setLibStore(next);
-  };
-
-  const deleteLibrarySource = (id: string) => {
-    const src = libStore.sources.find((s) => s.id === id);
-    if (!src || id === PERSONAL_ID) return;
-    if (!window.confirm(`Remove "${src.name}" (${src.itemIds.length} item(s)) from the library?`)) return;
-    const next = removeLibrarySource(libStore, id);
-    libSigRef.current = sigLibrary(next.items);
-    setLibStore(next);
-    try {
-      apiRef.current?.updateLibrary?.({ libraryItems: next.items });
-    } catch {
-      /* store is truth; the editor hydrates on next mount */
-    }
-    showToast(`Removed "${src.name}"`);
-  };
-
-  const deleteLibraryItem = (itemId: string) => {
-    const next = removeLibraryItem(libStore, itemId);
-    libSigRef.current = sigLibrary(next.items);
-    setLibStore(next);
-    try {
-      apiRef.current?.updateLibrary?.({ libraryItems: next.items });
-    } catch {
-      /* store is truth; the editor hydrates on next mount */
-    }
-  };
-
-  /** Sections for the Library tab: one per import, Personal first. */
-  const libSections = useMemo(
-    () =>
-      libStore.sources.map((s) => ({
-        ...s,
-        items: libStore.items.filter((i) => s.itemIds.includes(String(i?.id))),
-      })),
-    [libStore],
-  );
-
-  /** Open a link in the system browser; fall back to clipboard with a toast. */
-  const browseTo = (url: string) => {
-    void openExternal(url).then((r) => {
-      if (r === "copied") showToast("Browser did not open — link copied, paste it in your browser");
-      else if (r === "failed") showToast("Could not open the link");
-    });
-  };
-
-  const installFromLink = async () => {
-    const input = libLink.trim();
-    if (!input) return;
-    let parsed;
-    try {
-      parsed = parseAddLibraryLink(input);
-    } catch (err: any) {
-      showToast(err?.message ?? String(err));
-      return;
-    }
-    if (!window.confirm(`Install library from ${parsed.host}?`)) return;
-    try {
-      const items = await importLibraryFromUrl(parsed.libraryUrl);
-      setLibLink("");
-      installLibraryItems(parsed.host, "link", items);
-    } catch (err: any) {
-      showToast(err?.message ?? String(err));
-    }
-  };
-
-  /** One-click stamp: clone a library item with fresh ids, centered in view. */
-  const insertLibraryItem = (itemId: string) => {
-    const item = libStore.items.find((i) => i?.id === itemId);
-    if (!item?.elements?.length) {
-      showToast("That library item is empty");
-      return;
-    }
-    const fresh = cloneElementsFresh(item.elements);
-    const cur: any[] = apiRef.current?.getSceneElements?.() ?? active?.data.elements ?? [];
-    let view = {};
-    try {
-      view = apiRef.current?.getAppState?.() ?? {};
-    } catch {
-      /* fall back to defaults inside the helper */
-    }
-    const placed = centerElementsInView(fresh, view);
-    try {
-      apiRef.current?.updateScene?.({ elements: [...cur, ...placed] });
-    } catch (err: any) {
-      showToast(String(err?.message ?? err));
-      return;
-    }
-    showToast(`Stamped ${placed.length} element(s) — drag anywhere`);
-  };
-
-  /** Save the current canvas selection as a Personal library item. */
-  const addSelectionToLibrary = () => {
-    const api = apiRef.current;
-    const els: any[] = api?.getSceneElements?.() ?? [];
-    let ids: Record<string, boolean> = {};
-    try {
-      ids = api?.getAppState?.()?.selectedElementIds ?? {};
-    } catch {
-      /* ignore */
-    }
-    const sel = els.filter((e) => ids[e?.id] && !e?.isDeleted);
-    if (sel.length === 0) {
-      showToast("Select elements on the canvas first");
-      return;
-    }
-    const next = addPersonalItem(libStore, sel);
-    libSigRef.current = sigLibrary(next.items);
-    setLibStore(next);
-    try {
-      api?.updateLibrary?.({ libraryItems: next.items });
-    } catch {
-      /* store is truth; the editor hydrates on next mount */
-    }
-    showToast(`Saved ${sel.length} element(s) to Personal library`);
   };
 
   /** Parse files into scenes inside a folder. Skips unreadable files with a summary. */
@@ -776,30 +586,6 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeIdSafe]);
 
-  // Library thumbnails: render each item's elements to SVG once, cache by id.
-  useEffect(() => {
-    const missing = libStore.items.filter((it) => it?.id && !libThumbs[it.id]);
-    if (missing.length === 0) return;
-    let cancelled = false;
-    void (async () => {
-      const entries: Record<string, string> = {};
-      for (const it of missing.slice(0, 60)) {
-        try {
-          entries[it.id] = await svgForElements(it.elements ?? [], {});
-        } catch {
-          /* leave blank */
-        }
-        if (cancelled) return;
-      }
-      if (!cancelled && Object.keys(entries).length > 0) {
-        setLibThumbs((prev) => ({ ...prev, ...entries }));
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [libStore, libThumbs]);
-
   const stamp = () => new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
   const buildPreview = async (code: string) => {
@@ -1011,29 +797,6 @@ export default function App() {
     }
   };
 
-  const deleteFrame = (frameId: string) => {
-    const cur: any[] = apiRef.current?.getSceneElements?.() ?? active?.data.elements ?? [];
-    const target = cur.find((e: any) => e.id === frameId);
-    const label = String(target?.name ?? "Frame");
-    if (!window.confirm(`Delete slide "${label}" and its contents from the canvas?`)) return;
-    const next = cur.filter((e: any) => e.id !== frameId && e.frameId !== frameId);
-    try {
-      apiRef.current?.updateScene?.({ elements: next });
-    } catch {
-      /* mirror update below still applies */
-    }
-    // Write-through to the mirror so Slides updates even if the onChange echo is missed.
-    const id = activeIdRef.current;
-    sceneSigRef.current[id] = sigFor(next, active?.data.files, active?.data.appState?.viewBackgroundColor);
-    setScenes((prev) =>
-      prev.map((s) =>
-        s.id === id ? { ...s, updatedAt: Date.now(), data: { ...s.data, elements: next } } : s,
-      ),
-    );
-    setPresentIdx((i) => Math.max(0, Math.min(i, Math.max(frames.length - 2, 0))));
-    showToast(`Deleted slide "${label}"`);
-  };
-
   const startPresent = () => {
     if (frames.length === 0) {
       showToast("Add a Frame (▦ tool) to make slides first");
@@ -1148,7 +911,6 @@ export default function App() {
   const filtered = scenes.filter((s) =>
     search.trim() ? `${s.name} ${collName(s.collection)}`.toLowerCase().includes(search.toLowerCase()) : true,
   );
-  const noteKey = `${activeIdSafe}:${frames[Math.min(presentIdx, Math.max(frames.length - 1, 0))]?.id ?? "none"}`;
 
   return (
     <div className="app">
@@ -1180,14 +942,6 @@ export default function App() {
           ))}
         </div>
         <div className="actions">
-          <button
-            className="btn"
-            onClick={() => setPanelOpen((v) => !v)}
-            title={panelOpen ? "Hide panel" : "Show panel (Slides · Scenes · Library)"}
-            aria-expanded={panelOpen}
-          >
-            <PanelRight size={14} /> Panel
-          </button>
           <button className="btn" onClick={() => setRailOpen((v) => !v)} title="Toggle scenes panel">
             <PanelLeft size={14} /> {railOpen ? "Hide" : "Scenes"}
           </button>
@@ -1310,7 +1064,56 @@ export default function App() {
                 excalidrawAPI={(api: any) => {
                   apiRef.current = api;
                 }}
-              />
+              >
+                <MainMenu>
+                  <MainMenu.DefaultItems.LoadScene />
+                  <MainMenu.DefaultItems.SaveToActiveFile />
+                  <MainMenu.DefaultItems.SaveAsImage />
+                  <MainMenu.DefaultItems.Export />
+                  <MainMenu.Item icon={<FileText size={15} />} onSelect={() => void exportPdf()}>
+                    Export PDF
+                  </MainMenu.Item>
+                  <MainMenu.Item
+                    icon={<Presentation size={15} />}
+                    onSelect={() =>
+                      void downloadPptx(
+                        active?.data.elements ?? [],
+                        active?.data.files ?? {},
+                        active?.name ?? "deck",
+                      ).catch((e) => showToast(String(e)))
+                    }
+                  >
+                    Export PPTX
+                  </MainMenu.Item>
+                  <MainMenu.Separator />
+                  <MainMenu.DefaultItems.ClearCanvas />
+                  <MainMenu.DefaultItems.ChangeCanvasBackground />
+                  <MainMenu.Separator />
+                  <MainMenu.DefaultItems.SearchMenu />
+                  <MainMenu.DefaultItems.CommandPalette />
+                  <MainMenu.DefaultItems.Help />
+                  <MainMenu.Group title="Generate">
+                    <MainMenu.Item
+                      icon={<Sparkles size={15} />}
+                      onSelect={() => {
+                        setAiTab("generate");
+                        setAiOpen(true);
+                      }}
+                    >
+                      Text to diagram
+                    </MainMenu.Item>
+                    <MainMenu.Item
+                      icon={<Sparkles size={15} />}
+                      onSelect={() => {
+                        setAiTab("wireframe");
+                        setAiOpen(true);
+                      }}
+                    >
+                      Wireframe to code
+                    </MainMenu.Item>
+                  </MainMenu.Group>
+                </MainMenu>
+              </Excalidraw>
             </div>
           )}
 
@@ -1342,35 +1145,6 @@ export default function App() {
               <button onClick={() => { setMenuOpen(false); setDashOpen(true); }}>
                 <span className="mi"><LayoutDashboard size={15} /> Dashboard</span> <small>{scenes.length} scenes</small>
               </button>
-              <button onClick={() => { setMenuOpen(false); setLibOpen(true); }}>
-                <span className="mi"><Library size={15} /> Libraries…</span> <small>{libStore.items.length} items</small>
-              </button>
-              <hr />
-              <button
-                onClick={() => {
-                  if (!active) return;
-                  downloadText(`${active.name}.excalidraw`, toExcalidrawFile(active));
-                  setMenuOpen(false);
-                }}
-              >
-                <span className="mi"><FileDown size={15} /> Export scene JSON</span> <small>.excalidraw</small>
-              </button>
-              <button
-                onClick={() => {
-                  setMenuOpen(false);
-                  void downloadPng(active?.data.elements ?? [], active?.data.files ?? {}).catch((e) => showToast(String(e)));
-                }}
-              >
-                <span className="mi"><ImageIcon size={15} /> Export PNG</span> <small>local</small>
-              </button>
-              <button
-                onClick={() => {
-                  setMenuOpen(false);
-                  void downloadSvg(active?.data.elements ?? [], active?.data.files ?? {}).catch((e) => showToast(String(e)));
-                }}
-              >
-                <span className="mi"><Shapes size={15} /> Export SVG</span> <small>local</small>
-              </button>
               <hr />
               <button
                 onClick={() => {
@@ -1388,184 +1162,7 @@ export default function App() {
               >
                 <span className="mi"><CircleHelp size={15} /> Help & shortcuts</span> <small>?</small>
               </button>
-              <button
-                onClick={() => {
-                  if (!window.confirm("Clear this canvas? (scene stays, elements removed)")) return;
-                  apiRef.current?.updateScene?.({ elements: [] });
-                  setMenuOpen(false);
-                }}
-              >
-                <span className="mi"><RotateCcw size={15} /> Reset canvas</span> <small>clear</small>
-              </button>
             </div>
-          )}
-
-          {panelOpen && !nativeSidebar && (
-          <div className="slides-dock">
-            <div className="tabs">
-              <button className={dockTab === "slides" ? "on" : ""} onClick={() => setDockTab("slides")}>
-                Slides {frames.length > 0 ? `(${frames.length})` : ""}
-              </button>
-              <button className={dockTab === "scenes" ? "on" : ""} onClick={() => setDockTab("scenes")}>
-                Scenes
-              </button>
-              <button className={dockTab === "library" ? "on" : ""} onClick={() => setDockTab("library")}>
-                Library{libStore.items.length > 0 ? ` (${libStore.items.length})` : ""}
-              </button>
-            </div>
-            {dockTab === "slides" ? (
-              <>
-                <div className="list">
-                  {frames.length === 0 && (
-                    <div style={{ fontSize: 12, color: "var(--subtext0)", padding: 4 }}>
-                      No frames yet. Use the <b>▦ Frame</b> tool on the canvas toolbar, then each frame becomes a slide here.
-                    </div>
-                  )}
-                  {frames.map((f, i) => (
-                    <div key={f.id} className="scene-row-wrap">
-                      <button className={`slide-row${i === presentIdx ? " on" : ""}`} onClick={() => goToFrame(i)}>
-                        <i />
-                        <span>
-                          <b style={{ fontSize: 12.5 }}>{i + 1} · {f.name}</b>
-                        </span>
-                      </button>
-                      <button
-                        className="scene-del"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          deleteFrame(f.id);
-                        }}
-                        aria-label={`Delete slide ${f.name}`}
-                        title="Delete slide"
-                      >
-                        <Trash2 size={12} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-                {frames.length > 0 && (
-                  <div className="note-card">
-                    <div style={{ fontSize: 11, color: "var(--subtext0)", marginBottom: 4 }}>Presenter note — slide {presentIdx + 1}</div>
-                    <textarea
-                      placeholder="Talking points… (saved locally)"
-                      value={notes[noteKey] ?? ""}
-                      onChange={(e) => setNotes((prev) => ({ ...prev, [noteKey]: e.target.value }))}
-                    />
-                  </div>
-                )}
-                <div className="dock-foot">
-                  <button className="btn" onClick={() => void exportPdf()}>
-                    <FileText size={14} /> PDF
-                  </button>
-                  <button
-                    className="btn"
-                    onClick={() =>
-                      void downloadPptx(active?.data.elements ?? [], active?.data.files ?? {}, active?.name ?? "deck").catch((e) =>
-                        showToast(String(e)),
-                      )
-                    }
-                  >
-                    <Presentation size={14} /> PPTX
-                  </button>
-                  <button className="btn primary" onClick={startPresent}>
-                    <Play size={14} />
-                  </button>
-                </div>
-              </>
-            ) : dockTab === "scenes" ? (
-              <>
-                <div className="list">
-                  {scenes.slice(0, 6).map((s) => (
-                    <button key={s.id} className={`slide-row${s.id === activeIdSafe ? " on" : ""}`} onClick={() => switchScene(s.id)}>
-                      <i />
-                      <span>
-                        <b style={{ fontSize: 12.5 }}>{s.name}</b>
-                      </span>
-                    </button>
-                  ))}
-                </div>
-                <div className="dock-foot">
-                  <button className="btn" style={{ flex: 1 }} onClick={() => setDashOpen(true)}>
-                    Open dashboard
-                  </button>
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="lib-hint">
-                  Click an item to stamp it in front of you. Select canvas elements →{" "}
-                  <b>Add selection</b> saves them to Personal.
-                </div>
-                {libSections.map((sec) => (
-                  <div key={sec.id} className="lib-section">
-                    <div className="lib-sec-head">
-                      <b>{sec.name}</b>
-                      <small>{sec.items.length}</small>
-                      {sec.id !== PERSONAL_ID && (
-                        <button
-                          className="tool danger"
-                          onClick={() => deleteLibrarySource(sec.id)}
-                          title={`Remove section ${sec.name}`}
-                          aria-label={`Remove section ${sec.name}`}
-                        >
-                          <Trash2 size={12} />
-                        </button>
-                      )}
-                    </div>
-                    {sec.items.length > 0 && (
-                      <div className="lib-grid">
-                        {sec.items.map((it) => (
-                          <div key={it.id} className="lib-cell-wrap">
-                            <button
-                              className="lib-cell"
-                              title={`Stamp ${(it.elements ?? []).length} element(s)`}
-                              onClick={() => insertLibraryItem(it.id)}
-                            >
-                              {libThumbs[it.id] ? (
-                                <span style={{ width: "100%" }} dangerouslySetInnerHTML={{ __html: libThumbs[it.id] }} />
-                              ) : (
-                                <span className="mono" style={{ fontSize: 10, color: "#888" }}>
-                                  {(it.elements ?? []).length} els
-                                </span>
-                              )}
-                            </button>
-                            <button
-                              className="scene-del"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                deleteLibraryItem(it.id);
-                              }}
-                              aria-label="Delete library item"
-                              title="Delete item"
-                            >
-                              <X size={12} />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ))}
-                {libStore.items.length === 0 && (
-                  <div className="lib-hint">Empty — import a pack via ☰ → Libraries…</div>
-                )}
-                <div className="dock-foot">
-                  <button
-                    className="btn"
-                    style={{ flex: 1 }}
-                    disabled={selectedCount === 0}
-                    onClick={addSelectionToLibrary}
-                    title={selectedCount === 0 ? "Select elements on the canvas first" : "Save selection to Personal library"}
-                  >
-                    <Plus size={14} /> Add selection{selectedCount > 0 ? ` (${selectedCount})` : ""}
-                  </button>
-                  <button className="btn" style={{ flex: 1 }} onClick={() => setLibOpen(true)}>
-                    Manage…
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
           )}
 
           <div className="ai-dock" onContextMenu={(e) => e.preventDefault()}>
@@ -1727,88 +1324,6 @@ export default function App() {
             )}
             <div className="row">
               <button className="btn primary" onClick={() => setDashOpen(false)}>
-                Done
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {libOpen && (
-        <div className="overlay" style={{ position: "fixed" }} onClick={(e) => e.target === e.currentTarget && setLibOpen(false)}>
-          <div className="dialog" style={{ maxWidth: 640 }}>
-            <h3>Libraries — {libStore.items.length} items, import-only</h3>
-            <p>
-              Shape packs plus your own additions. Day to day, use the <b>Library panel</b> in the
-              canvas toolbar (book icon): search, click an item to stamp it, and add your own by
-              selecting elements on the canvas → add. Library content follows its publisher's license.
-            </p>
-            <div className="row">
-              <button className="btn" onClick={() => browseTo(LIBRARIES_SITE)}>
-                <span className="mi"><ExternalLink size={15} /> Browse libraries</span>
-              </button>
-              <button className="btn" onClick={() => libInputRef.current?.click()}>
-                <span className="mi"><FileUp size={15} /> Import .excalidrawlib</span>
-              </button>
-            </div>
-            <div className="row">
-              <label className="f">
-                Add from excalidraw.com link
-                <input
-                  value={libLink}
-                  onChange={(e) => setLibLink(e.target.value)}
-                  placeholder="https://excalidraw.com/#addLibrary=…"
-                  spellCheck={false}
-                />
-              </label>
-              <button
-                className="btn primary"
-                style={{ flex: "0 0 auto", alignSelf: "flex-end", height: 37 }}
-                onClick={() => void installFromLink()}
-                disabled={!libLink.trim()}
-              >
-                Install
-              </button>
-            </div>
-            <div className="row">
-              <label className="f">
-                My library page (this machine only)
-                <input
-                  value={libUrl}
-                  onChange={(e) => setLibUrl(e.target.value)}
-                  placeholder="https://libraries.excalidraw.com/…"
-                  spellCheck={false}
-                />
-              </label>
-              <button
-                className="btn"
-                style={{ flex: "0 0 auto", alignSelf: "flex-end", height: 37 }}
-                onClick={() => libUrl.trim() && browseTo(libUrl.trim())}
-                disabled={!libUrl.trim()}
-              >
-                Open
-              </button>
-            </div>
-            <div className="grid" style={{ marginTop: 12 }}>
-              {libStore.sources.map((s) => (
-                <div className="card" key={s.id}>
-                  <b>{s.name}</b>
-                  <br />
-                  <small>
-                    {s.kind} · {s.itemIds.length} items · {new Date(s.addedAt).toLocaleDateString()}
-                  </small>
-                  {s.id !== PERSONAL_ID && (
-                    <div className="row">
-                      <button className="btn" onClick={() => deleteLibrarySource(s.id)}>
-                        Remove
-                      </button>
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-            <div className="row">
-              <button className="btn primary" onClick={() => setLibOpen(false)}>
                 Done
               </button>
             </div>
@@ -2206,24 +1721,6 @@ export default function App() {
           const folderName = window.prompt(`Import ${files.length} file(s) into a new folder:`, topDir);
           if (folderName === null) return;
           await importManyFiles(files, ensureCollection(folderName));
-        }}
-      />
-      <input
-        ref={libInputRef}
-        type="file"
-        accept=".excalidrawlib,application/json"
-        style={{ display: "none" }}
-        onChange={async (e) => {
-          const f = e.target.files?.[0];
-          e.target.value = "";
-          if (!f) return;
-          try {
-            const items = await importLibraryFile(f);
-            const name = f.name.replace(/\.excalidrawlib$/i, "") || "library";
-            installLibraryItems(name, "file", items);
-          } catch (err: any) {
-            showToast(err?.message ?? String(err));
-          }
         }}
       />
     </div>
