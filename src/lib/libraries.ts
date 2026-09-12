@@ -8,6 +8,7 @@
 // section while your own additions stay Personal.
 
 import { loadSceneOrLibraryFromBlob, restoreLibraryItems } from "@excalidraw/excalidraw";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { uid } from "./scenes";
 
 export interface LibrarySource {
@@ -205,6 +206,14 @@ export function removeLibrarySource(store: LibraryStore, id: string): LibrarySto
   };
 }
 
+/** Drop one item (from the store, its section, and the editor on next sync). */
+export function removeLibraryItem(store: LibraryStore, itemId: string): LibraryStore {
+  return {
+    items: store.items.filter((i) => String(i?.id) !== itemId),
+    sources: store.sources.map((s) => ({ ...s, itemIds: s.itemIds.filter((id) => id !== itemId) })),
+  };
+}
+
 export async function importLibraryFile(file: File): Promise<any[]> {
   const contents = (await loadSceneOrLibraryFromBlob(file, null, null)) as any;
   const raw = contents?.data?.libraryItems ?? contents?.data?.library;
@@ -272,12 +281,41 @@ export function saveLibraryUrl(v: string): void {
   }
 }
 
-/** Open a URL in the system browser (desktop) or a new tab (dev browser). */
-export async function openExternal(url: string): Promise<void> {
+export async function copyText(text: string): Promise<void> {
   try {
-    const { openUrl } = await import("@tauri-apps/plugin-opener");
-    await openUrl(url);
+    await navigator.clipboard.writeText(text);
+    return;
   } catch {
-    window.open(url, "_blank", "noopener,noreferrer");
+    /* clipboard API unavailable — legacy fallback below */
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  try {
+    if (!document.execCommand("copy")) throw new Error("copy failed");
+  } finally {
+    ta.remove();
+  }
+}
+
+/**
+ * Open a URL in the system browser (desktop) or a new tab (dev browser).
+ * Returns how it went so callers can tell the user; never throws.
+ */
+export async function openExternal(url: string): Promise<"opened" | "copied" | "failed"> {
+  try {
+    await openUrl(url);
+    return "opened";
+  } catch {
+    /* fall through to clipboard */
+  }
+  try {
+    await copyText(url);
+    return "copied";
+  } catch {
+    return "failed";
   }
 }

@@ -284,6 +284,131 @@ export async function generateMermaid(cfg: AIConfig, prompt: string): Promise<st
   return extractMermaid(raw);
 }
 
+const WIREFRAME_SYSTEM = `You turn a hand-drawn UI wireframe into a single self-contained HTML file.
+Use Tailwind CSS via CDN (https://cdn.tailwindcss.com) plus minimal custom CSS in a <style> block.
+Recreate the layout, components, and text faithfully as a polished, realistic interface; static placeholders are fine for interactive parts.
+Reply with ONLY one \`\`\`html fenced block — no prose, no explanation.`;
+
+/** Pull an HTML document out of a model reply (fenced or raw). */
+export function extractHtml(text: string): string {
+  const fenced = text.match(/```html\s*([\s\S]*?)```/i);
+  if (fenced) return fenced[1].trim();
+  const clean = text.trim();
+  if (/<!doctype html|<html[\s>]/i.test(clean)) return clean;
+  throw new Error("Model did not return HTML. Try a chat-style vision model (e.g. gpt-4o-mini).");
+}
+
+function splitDataUrl(dataUrl: string): { media: string; b64: string } {
+  const m = dataUrl.match(/^data:(image\/(?:png|jpeg|webp));base64,(.*)$/s);
+  if (!m) throw new Error("Bad snapshot encoding.");
+  return { media: m[1], b64: m[2] };
+}
+
+async function visionOllamaNative(cfg: AIConfig, system: string, text: string, dataUrl: string): Promise<string> {
+  const { b64 } = splitDataUrl(dataUrl);
+  const { status, text: res } = await postJson(
+    `${cfg.baseUrl.replace(/\/$/, "")}/api/chat`,
+    { "Content-Type": "application/json" },
+    {
+      model: cfg.model,
+      stream: false,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: text, images: [b64] },
+      ],
+    },
+  );
+  if (status === 0) throw new Error("Ollama not reachable. Is Ollama running? (ollama serve)");
+  if (status < 200 || status >= 300) throw httpError(status, res);
+  const content = parseJson(res)?.message?.content;
+  if (!content) throw new Error("Empty reply from model.");
+  return String(content);
+}
+
+async function visionOpenAICompatible(cfg: AIConfig, system: string, text: string, dataUrl: string): Promise<string> {
+  if (cfg.apiStyle === "responses") {
+    throw new Error("Wireframe needs a chat-style model — switch API style to Chat Completions.");
+  }
+  const base = cfg.baseUrl.replace(/\/$/, "");
+  const { status, text: res } = await postJson(
+    `${base}/chat/completions`,
+    {
+      "Content-Type": "application/json",
+      ...(cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {}),
+    },
+    {
+      model: cfg.model,
+      temperature: 0.2,
+      messages: [
+        { role: "system", content: system },
+        {
+          role: "user",
+          content: [
+            { type: "text", text },
+            { type: "image_url", image_url: { url: dataUrl } },
+          ],
+        },
+      ],
+    },
+  );
+  if (status < 200 || status >= 300) throw httpError(status, res);
+  const content = parseJson(res)?.choices?.[0]?.message?.content;
+  if (!content) throw new Error("Empty reply from model.");
+  return String(content);
+}
+
+async function visionAnthropic(cfg: AIConfig, system: string, text: string, dataUrl: string): Promise<string> {
+  const { media, b64 } = splitDataUrl(dataUrl);
+  const { status, text: res } = await postJson(
+    "https://api.anthropic.com/v1/messages",
+    {
+      "Content-Type": "application/json",
+      "x-api-key": cfg.apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    {
+      model: cfg.model,
+      max_tokens: 4096,
+      system,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "image", source: { type: "base64", media_type: media, data: b64 } },
+            { type: "text", text },
+          ],
+        },
+      ],
+    },
+  );
+  if (status < 200 || status >= 300) throw httpError(status, res);
+  const reply = (parseJson(res)?.content ?? [])
+    .filter((b: any) => b.type === "text")
+    .map((b: any) => b.text)
+    .join("\n");
+  if (!reply) throw new Error("Empty reply from model.");
+  return reply;
+}
+
+/**
+ * Turn a wireframe snapshot (data URL) into a single HTML file via a
+ * vision-capable model. Cloud defaults (gpt-4o-mini, claude-haiku,
+ * gemini-flash) all see images; local Ollama needs a vision model
+ * (e.g. `ollama pull qwen2.5vl`).
+ */
+export async function generateWireframe(cfg: AIConfig, dataUrl: string, instructions: string): Promise<string> {
+  const extra = instructions.trim();
+  const prompt = extra
+    ? `Build this UI as a web page. Extra instructions: ${extra}`
+    : "Build this UI as a web page.";
+  let raw: string;
+  if (cfg.kind === "ollama") raw = await visionOllamaNative(cfg, WIREFRAME_SYSTEM, prompt, dataUrl);
+  else if (cfg.kind === "anthropic") raw = await visionAnthropic(cfg, WIREFRAME_SYSTEM, prompt, dataUrl);
+  else raw = await visionOpenAICompatible(cfg, WIREFRAME_SYSTEM, prompt, dataUrl);
+  return extractHtml(raw);
+}
+
 /**
  * Convert Mermaid source to a canvas scene with the editor's own converter.
  * Returned elements are fully formed (correct text binding etc.).

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Excalidraw, Sidebar } from "@excalidraw/excalidraw";
+import { Excalidraw } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import {
   Bot,
@@ -65,12 +65,14 @@ import {
   addPersonalItem,
   centerElementsInView,
   cloneElementsFresh,
+  copyText,
   importLibraryFile,
   importLibraryFromUrl,
   loadLibraryStore,
   loadLibraryUrl,
   openExternal,
   parseAddLibraryLink,
+  removeLibraryItem,
   removeLibrarySource,
   saveLibraryStore,
   saveLibraryUrl,
@@ -78,14 +80,11 @@ import {
   syncFromEditor,
   type LibraryStore,
 } from "./lib/libraries";
-import { AI_DEFAULTS, generateMermaid, mermaidToScene, shiftScene, type AIConfig, type AIKind, type MermaidScene } from "./lib/ai";
+import { AI_DEFAULTS, generateMermaid, generateWireframe, mermaidToScene, shiftScene, type AIConfig, type AIKind, type MermaidScene } from "./lib/ai";
 import { downloadPng, downloadPptx, downloadSvg, listFrames, svgForElements } from "./lib/exporters";
 
 type Flavor = "latte" | "frappe" | "macchiato" | "mocha";
 const FLAVORS: Flavor[] = ["latte", "frappe", "macchiato", "mocha"];
-
-/** Name of our custom native sidebar (Slides / Scenes / Library tabs). */
-const PANEL_NAME = "neattttty";
 
 const AI_STORE_KEY = "neattttty.ai.v1";
 const NOTES_KEY = "neattttty.notes.v1";
@@ -199,7 +198,9 @@ export default function App() {
     return FLAVORS.includes(f as Flavor) ? (f as Flavor) : "mocha";
   });
   const [railOpen, setRailOpen] = useState(true);
-  const [panel, setPanel] = useState<{ tab: string } | null>(null);
+  const [dockTab, setDockTab] = useState<"slides" | "scenes" | "library">("slides");
+  const [panelOpen, setPanelOpen] = useState(true);
+  const [nativeSidebar, setNativeSidebar] = useState(false);
   const [selectedCount, setSelectedCount] = useState(0);
   const [libThumbs, setLibThumbs] = useState<Record<string, string>>({});
   const [menuOpen, setMenuOpen] = useState(false);
@@ -210,7 +211,12 @@ export default function App() {
   const [aiPrompt, setAiPrompt] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
-  const [aiTab, setAiTab] = useState<"generate" | "mermaid">("generate");
+  const [aiTab, setAiTab] = useState<"generate" | "mermaid" | "wireframe">("generate");
+  const [wfBusy, setWfBusy] = useState(false);
+  const [wfSnap, setWfSnap] = useState<{ dataUrl: string; count: number; whole: boolean; els: any[] } | null>(null);
+  const [wfHtml, setWfHtml] = useState("");
+  const [wfView, setWfView] = useState<"preview" | "code">("preview");
+  const [wfInstructions, setWfInstructions] = useState("");
   const [chat, setChat] = useState<Array<{ role: "user" | "assistant"; text: string; time: string }>>([]);
   const [draftMermaid, setDraftMermaid] = useState("");
   const [mermaidTabCode, setMermaidTabCode] = useState("");
@@ -298,6 +304,8 @@ export default function App() {
         const sel = appState?.selectedElementIds ?? {};
         const n = Object.keys(sel).length;
         setSelectedCount((prev) => (prev === n ? prev : n));
+        const sb = !!appState?.openSidebar;
+        setNativeSidebar((prev) => (prev === sb ? prev : sb));
       } catch {
         /* editor not ready */
       }
@@ -401,11 +409,10 @@ export default function App() {
     showToast(`Folder "${name}" created`);
   };
 
-  /** Push items into the editor library and open our sidebar on the Library tab. */
+  /** Push items into the editor library (native panel picks them up too). */
   const pushLibraryToEditor = (items: any[]) => {
     try {
       apiRef.current?.updateLibrary?.({ libraryItems: items, merge: true });
-      apiRef.current?.updateScene?.({ appState: { openSidebar: { name: PANEL_NAME, tab: "library" } } });
     } catch {
       /* panel picks them up on next mount via initialData; the store already saved */
     }
@@ -439,6 +446,35 @@ export default function App() {
       /* store is truth; the editor hydrates on next mount */
     }
     showToast(`Removed "${src.name}"`);
+  };
+
+  const deleteLibraryItem = (itemId: string) => {
+    const next = removeLibraryItem(libStore, itemId);
+    libSigRef.current = sigLibrary(next.items);
+    setLibStore(next);
+    try {
+      apiRef.current?.updateLibrary?.({ libraryItems: next.items });
+    } catch {
+      /* store is truth; the editor hydrates on next mount */
+    }
+  };
+
+  /** Sections for the Library tab: one per import, Personal first. */
+  const libSections = useMemo(
+    () =>
+      libStore.sources.map((s) => ({
+        ...s,
+        items: libStore.items.filter((i) => s.itemIds.includes(String(i?.id))),
+      })),
+    [libStore],
+  );
+
+  /** Open a link in the system browser; fall back to clipboard with a toast. */
+  const browseTo = (url: string) => {
+    void openExternal(url).then((r) => {
+      if (r === "copied") showToast("Browser did not open — link copied, paste it in your browser");
+      else if (r === "failed") showToast("Could not open the link");
+    });
   };
 
   const installFromLink = async () => {
@@ -827,6 +863,111 @@ export default function App() {
     }
   };
 
+  /** Snapshot selection (or whole scene) as a downscaled JPEG data URL. */
+  const captureWireframe = async () => {
+    const els: any[] = apiRef.current?.getSceneElements?.() ?? active?.data.elements ?? [];
+    let ids: Record<string, boolean> = {};
+    try {
+      ids = apiRef.current?.getAppState?.()?.selectedElementIds ?? {};
+    } catch {
+      /* ignore */
+    }
+    const sel = els.filter((e) => ids[e?.id] && !e?.isDeleted);
+    const use = sel.length > 0 ? sel : els.filter((e) => !e?.isDeleted);
+    if (use.length === 0) {
+      showToast("Draw a wireframe first");
+      return null;
+    }
+    const { exportToCanvas } = await import("@excalidraw/excalidraw");
+    const canvas = await (exportToCanvas as any)({
+      elements: use,
+      appState: { viewBackgroundColor: "#ffffff" },
+      files: active?.data.files ?? {},
+    });
+    const scale = Math.min(1, 1536 / Math.max(canvas.width, canvas.height));
+    const out = document.createElement("canvas");
+    out.width = Math.max(1, Math.round(canvas.width * scale));
+    out.height = Math.max(1, Math.round(canvas.height * scale));
+    const g = out.getContext("2d");
+    if (!g) throw new Error("Could not rasterize the canvas");
+    g.fillStyle = "#ffffff";
+    g.fillRect(0, 0, out.width, out.height);
+    g.drawImage(canvas, 0, 0, out.width, out.height);
+    return { dataUrl: out.toDataURL("image/jpeg", 0.85), count: use.length, whole: sel.length === 0, els: use };
+  };
+
+  const runWireframe = async () => {
+    if (wfBusy) return;
+    setWfBusy(true);
+    try {
+      let snap = wfSnap;
+      if (!snap) {
+        const cap = await captureWireframe();
+        if (!cap) return;
+        snap = cap;
+        setWfSnap(snap);
+      }
+      const html = await generateWireframe(aiCfg, snap.dataUrl, wfInstructions);
+      setWfHtml(html);
+      setWfView("preview");
+    } catch (err: any) {
+      showToast(err?.message ?? String(err));
+    } finally {
+      setWfBusy(false);
+    }
+  };
+
+  const copyWireframe = async () => {
+    if (!wfHtml) return;
+    try {
+      await copyText(wfHtml);
+      showToast("Code copied");
+    } catch {
+      showToast("Could not copy");
+    }
+  };
+
+  /** Insert the generated page as a live preview frame right of the source. */
+  const insertWireframe = async () => {
+    if (!wfHtml) {
+      showToast("Generate code first");
+      return;
+    }
+    try {
+      const { restoreElements } = await import("@excalidraw/excalidraw");
+      const src: any[] = wfSnap?.els ?? [];
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      for (const e of src) {
+        if (typeof e?.x !== "number" || typeof e?.y !== "number") continue;
+        minX = Math.min(minX, e.x);
+        minY = Math.min(minY, e.y);
+        if (typeof e?.width === "number") maxX = Math.max(maxX, e.x + e.width);
+      }
+      const W = 880;
+      const H = 620;
+      const partial = {
+        id: uid(),
+        type: "frame",
+        name: "AI Frame",
+        x: isFinite(maxX) ? maxX + 80 : 80,
+        y: isFinite(minY) ? minY : 80,
+        width: W,
+        height: H,
+        customData: { generationData: { status: "done", html: wfHtml } },
+      };
+      const restored = (restoreElements as any)([partial], null) as any[];
+      if (!Array.isArray(restored) || restored.length === 0) throw new Error("Could not build the frame");
+      const cur: any[] = apiRef.current?.getSceneElements?.() ?? active?.data.elements ?? [];
+      apiRef.current?.updateScene?.({ elements: [...cur, ...restored] });
+      setAiOpen(false);
+      showToast("Inserted live preview frame — resize it to test responsiveness");
+    } catch (err: any) {
+      showToast(err?.message ?? String(err));
+    }
+  };
+
   const insertPreview = () => {
     const scene = previewSceneRef.current;
     if (!scene || scene.elements.length === 0) {
@@ -891,31 +1032,6 @@ export default function App() {
     );
     setPresentIdx((i) => Math.max(0, Math.min(i, Math.max(frames.length - 2, 0))));
     showToast(`Deleted slide "${label}"`);
-  };
-
-  /** Toggle our custom native sidebar (Slides / Scenes / Library tabs). */
-  const togglePanel = (tab?: string) => {
-    const api = apiRef.current;
-    if (!api) return;
-    const target = tab ?? panel?.tab ?? "slides";
-    try {
-      if (typeof api.toggleSidebar === "function") {
-        api.toggleSidebar({ name: PANEL_NAME, tab: target });
-        return;
-      }
-    } catch {
-      /* fall through to updateScene */
-    }
-    try {
-      const cur = api.getAppState?.()?.openSidebar;
-      if (cur?.name === PANEL_NAME && (!tab || cur.tab === tab)) {
-        api.updateScene?.({ appState: { openSidebar: null } });
-      } else {
-        api.updateScene?.({ appState: { openSidebar: { name: PANEL_NAME, tab: target } } });
-      }
-    } catch {
-      /* ignore */
-    }
   };
 
   const startPresent = () => {
@@ -1066,9 +1182,9 @@ export default function App() {
         <div className="actions">
           <button
             className="btn"
-            onClick={() => togglePanel()}
-            title={panel ? `Hide panel (${panel.tab})` : "Show panel (Slides · Scenes · Library)"}
-            aria-expanded={!!panel}
+            onClick={() => setPanelOpen((v) => !v)}
+            title={panelOpen ? "Hide panel" : "Show panel (Slides · Scenes · Library)"}
+            aria-expanded={panelOpen}
           >
             <PanelRight size={14} /> Panel
           </button>
@@ -1194,147 +1310,7 @@ export default function App() {
                 excalidrawAPI={(api: any) => {
                   apiRef.current = api;
                 }}
-              >
-                <Sidebar
-                  name={PANEL_NAME}
-                  onStateChange={(state) => setPanel(state ? { tab: state.tab ?? "slides" } : null)}
-                >
-                  <Sidebar.Header>Neattttty</Sidebar.Header>
-                  <Sidebar.TabTriggers>
-                    <Sidebar.TabTrigger tab="slides">
-                      Slides{frames.length > 0 ? ` (${frames.length})` : ""}
-                    </Sidebar.TabTrigger>
-                    <Sidebar.TabTrigger tab="scenes">Scenes</Sidebar.TabTrigger>
-                    <Sidebar.TabTrigger tab="library">
-                      Library{libStore.items.length > 0 ? ` (${libStore.items.length})` : ""}
-                    </Sidebar.TabTrigger>
-                  </Sidebar.TabTriggers>
-                  <Sidebar.Tabs>
-                    <Sidebar.Tab tab="slides">
-                      <div className="neat-tab">
-                        <div className="list">
-                          {frames.length === 0 && (
-                            <div style={{ fontSize: 12, color: "var(--subtext0)", padding: 4 }}>
-                              No frames yet. Use the <b>▦ Frame</b> tool on the canvas toolbar, then each frame becomes a slide here.
-                            </div>
-                          )}
-                          {frames.map((f, i) => (
-                            <div key={f.id} className="scene-row-wrap">
-                              <button className={`slide-row${i === presentIdx ? " on" : ""}`} onClick={() => goToFrame(i)}>
-                                <i />
-                                <span>
-                                  <b style={{ fontSize: 12.5 }}>{i + 1} · {f.name}</b>
-                                </span>
-                              </button>
-                              <button
-                                className="scene-del"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  deleteFrame(f.id);
-                                }}
-                                aria-label={`Delete slide ${f.name}`}
-                                title="Delete slide"
-                              >
-                                <Trash2 size={12} />
-                              </button>
-                            </div>
-                          ))}
-                        </div>
-                        {frames.length > 0 && (
-                          <div className="note-card">
-                            <div style={{ fontSize: 11, color: "var(--subtext0)", marginBottom: 4 }}>Presenter note — slide {presentIdx + 1}</div>
-                            <textarea
-                              placeholder="Talking points… (saved locally)"
-                              value={notes[noteKey] ?? ""}
-                              onChange={(e) => setNotes((prev) => ({ ...prev, [noteKey]: e.target.value }))}
-                            />
-                          </div>
-                        )}
-                        <div className="dock-foot">
-                          <button className="btn" onClick={() => void exportPdf()}>
-                            <FileText size={14} /> PDF
-                          </button>
-                          <button
-                            className="btn"
-                            onClick={() =>
-                              void downloadPptx(active?.data.elements ?? [], active?.data.files ?? {}, active?.name ?? "deck").catch((e) =>
-                                showToast(String(e)),
-                              )
-                            }
-                          >
-                            <Presentation size={14} /> PPTX
-                          </button>
-                          <button className="btn primary" onClick={startPresent}>
-                            <Play size={14} />
-                          </button>
-                        </div>
-                      </div>
-                    </Sidebar.Tab>
-                    <Sidebar.Tab tab="scenes">
-                      <div className="neat-tab">
-                        <div className="list">
-                          {scenes.slice(0, 6).map((s) => (
-                            <button key={s.id} className={`slide-row${s.id === activeIdSafe ? " on" : ""}`} onClick={() => switchScene(s.id)}>
-                              <i />
-                              <span>
-                                <b style={{ fontSize: 12.5 }}>{s.name}</b>
-                              </span>
-                            </button>
-                          ))}
-                        </div>
-                        <div className="dock-foot">
-                          <button className="btn" style={{ flex: 1 }} onClick={() => setDashOpen(true)}>
-                            Open dashboard
-                          </button>
-                        </div>
-                      </div>
-                    </Sidebar.Tab>
-                    <Sidebar.Tab tab="library">
-                      <div className="neat-tab">
-                        <div className="lib-hint">
-                          Click an item to stamp it in front of you. Select canvas elements →{" "}
-                          <b>Add selection</b> saves them to Personal.
-                        </div>
-                        <div className="lib-grid">
-                          {libStore.items.map((it) => (
-                            <button
-                              key={it.id}
-                              className="lib-cell"
-                              title={`Stamp ${(it.elements ?? []).length} element(s)`}
-                              onClick={() => insertLibraryItem(it.id)}
-                            >
-                              {libThumbs[it.id] ? (
-                                <span style={{ width: "100%" }} dangerouslySetInnerHTML={{ __html: libThumbs[it.id] }} />
-                              ) : (
-                                <span className="mono" style={{ fontSize: 10, color: "#888" }}>
-                                  {(it.elements ?? []).length} els
-                                </span>
-                              )}
-                            </button>
-                          ))}
-                          {libStore.items.length === 0 && (
-                            <div className="lib-hint">Empty — import a pack via ☰ → Libraries…</div>
-                          )}
-                        </div>
-                        <div className="dock-foot">
-                          <button
-                            className="btn"
-                            style={{ flex: 1 }}
-                            disabled={selectedCount === 0}
-                            onClick={addSelectionToLibrary}
-                            title={selectedCount === 0 ? "Select elements on the canvas first" : "Save selection to Personal library"}
-                          >
-                            <Plus size={14} /> Add selection{selectedCount > 0 ? ` (${selectedCount})` : ""}
-                          </button>
-                          <button className="btn" style={{ flex: 1 }} onClick={() => setLibOpen(true)}>
-                            Manage…
-                          </button>
-                        </div>
-                      </div>
-                    </Sidebar.Tab>
-                  </Sidebar.Tabs>
-                </Sidebar>
-              </Excalidraw>
+              />
             </div>
           )}
 
@@ -1422,6 +1398,174 @@ export default function App() {
                 <span className="mi"><RotateCcw size={15} /> Reset canvas</span> <small>clear</small>
               </button>
             </div>
+          )}
+
+          {panelOpen && !nativeSidebar && (
+          <div className="slides-dock">
+            <div className="tabs">
+              <button className={dockTab === "slides" ? "on" : ""} onClick={() => setDockTab("slides")}>
+                Slides {frames.length > 0 ? `(${frames.length})` : ""}
+              </button>
+              <button className={dockTab === "scenes" ? "on" : ""} onClick={() => setDockTab("scenes")}>
+                Scenes
+              </button>
+              <button className={dockTab === "library" ? "on" : ""} onClick={() => setDockTab("library")}>
+                Library{libStore.items.length > 0 ? ` (${libStore.items.length})` : ""}
+              </button>
+            </div>
+            {dockTab === "slides" ? (
+              <>
+                <div className="list">
+                  {frames.length === 0 && (
+                    <div style={{ fontSize: 12, color: "var(--subtext0)", padding: 4 }}>
+                      No frames yet. Use the <b>▦ Frame</b> tool on the canvas toolbar, then each frame becomes a slide here.
+                    </div>
+                  )}
+                  {frames.map((f, i) => (
+                    <div key={f.id} className="scene-row-wrap">
+                      <button className={`slide-row${i === presentIdx ? " on" : ""}`} onClick={() => goToFrame(i)}>
+                        <i />
+                        <span>
+                          <b style={{ fontSize: 12.5 }}>{i + 1} · {f.name}</b>
+                        </span>
+                      </button>
+                      <button
+                        className="scene-del"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          deleteFrame(f.id);
+                        }}
+                        aria-label={`Delete slide ${f.name}`}
+                        title="Delete slide"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                {frames.length > 0 && (
+                  <div className="note-card">
+                    <div style={{ fontSize: 11, color: "var(--subtext0)", marginBottom: 4 }}>Presenter note — slide {presentIdx + 1}</div>
+                    <textarea
+                      placeholder="Talking points… (saved locally)"
+                      value={notes[noteKey] ?? ""}
+                      onChange={(e) => setNotes((prev) => ({ ...prev, [noteKey]: e.target.value }))}
+                    />
+                  </div>
+                )}
+                <div className="dock-foot">
+                  <button className="btn" onClick={() => void exportPdf()}>
+                    <FileText size={14} /> PDF
+                  </button>
+                  <button
+                    className="btn"
+                    onClick={() =>
+                      void downloadPptx(active?.data.elements ?? [], active?.data.files ?? {}, active?.name ?? "deck").catch((e) =>
+                        showToast(String(e)),
+                      )
+                    }
+                  >
+                    <Presentation size={14} /> PPTX
+                  </button>
+                  <button className="btn primary" onClick={startPresent}>
+                    <Play size={14} />
+                  </button>
+                </div>
+              </>
+            ) : dockTab === "scenes" ? (
+              <>
+                <div className="list">
+                  {scenes.slice(0, 6).map((s) => (
+                    <button key={s.id} className={`slide-row${s.id === activeIdSafe ? " on" : ""}`} onClick={() => switchScene(s.id)}>
+                      <i />
+                      <span>
+                        <b style={{ fontSize: 12.5 }}>{s.name}</b>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                <div className="dock-foot">
+                  <button className="btn" style={{ flex: 1 }} onClick={() => setDashOpen(true)}>
+                    Open dashboard
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="lib-hint">
+                  Click an item to stamp it in front of you. Select canvas elements →{" "}
+                  <b>Add selection</b> saves them to Personal.
+                </div>
+                {libSections.map((sec) => (
+                  <div key={sec.id} className="lib-section">
+                    <div className="lib-sec-head">
+                      <b>{sec.name}</b>
+                      <small>{sec.items.length}</small>
+                      {sec.id !== PERSONAL_ID && (
+                        <button
+                          className="tool danger"
+                          onClick={() => deleteLibrarySource(sec.id)}
+                          title={`Remove section ${sec.name}`}
+                          aria-label={`Remove section ${sec.name}`}
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      )}
+                    </div>
+                    {sec.items.length > 0 && (
+                      <div className="lib-grid">
+                        {sec.items.map((it) => (
+                          <div key={it.id} className="lib-cell-wrap">
+                            <button
+                              className="lib-cell"
+                              title={`Stamp ${(it.elements ?? []).length} element(s)`}
+                              onClick={() => insertLibraryItem(it.id)}
+                            >
+                              {libThumbs[it.id] ? (
+                                <span style={{ width: "100%" }} dangerouslySetInnerHTML={{ __html: libThumbs[it.id] }} />
+                              ) : (
+                                <span className="mono" style={{ fontSize: 10, color: "#888" }}>
+                                  {(it.elements ?? []).length} els
+                                </span>
+                              )}
+                            </button>
+                            <button
+                              className="scene-del"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                deleteLibraryItem(it.id);
+                              }}
+                              aria-label="Delete library item"
+                              title="Delete item"
+                            >
+                              <X size={12} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+                {libStore.items.length === 0 && (
+                  <div className="lib-hint">Empty — import a pack via ☰ → Libraries…</div>
+                )}
+                <div className="dock-foot">
+                  <button
+                    className="btn"
+                    style={{ flex: 1 }}
+                    disabled={selectedCount === 0}
+                    onClick={addSelectionToLibrary}
+                    title={selectedCount === 0 ? "Select elements on the canvas first" : "Save selection to Personal library"}
+                  >
+                    <Plus size={14} /> Add selection{selectedCount > 0 ? ` (${selectedCount})` : ""}
+                  </button>
+                  <button className="btn" style={{ flex: 1 }} onClick={() => setLibOpen(true)}>
+                    Manage…
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
           )}
 
           <div className="ai-dock" onContextMenu={(e) => e.preventDefault()}>
@@ -1600,7 +1744,7 @@ export default function App() {
               selecting elements on the canvas → add. Library content follows its publisher's license.
             </p>
             <div className="row">
-              <button className="btn" onClick={() => void openExternal(LIBRARIES_SITE)}>
+              <button className="btn" onClick={() => browseTo(LIBRARIES_SITE)}>
                 <span className="mi"><ExternalLink size={15} /> Browse libraries</span>
               </button>
               <button className="btn" onClick={() => libInputRef.current?.click()}>
@@ -1639,7 +1783,7 @@ export default function App() {
               <button
                 className="btn"
                 style={{ flex: "0 0 auto", alignSelf: "flex-end", height: 37 }}
-                onClick={() => libUrl.trim() && void openExternal(libUrl.trim())}
+                onClick={() => libUrl.trim() && browseTo(libUrl.trim())}
                 disabled={!libUrl.trim()}
               >
                 Open
@@ -1768,12 +1912,100 @@ export default function App() {
                 <button className={aiTab === "mermaid" ? "on" : ""} onClick={() => setAiTab("mermaid")}>
                   Mermaid
                 </button>
+                <button className={aiTab === "wireframe" ? "on" : ""} onClick={() => setAiTab("wireframe")}>
+                  Wireframe
+                </button>
               </div>
               <button className="iconbtn" onClick={() => !aiBusy && setAiOpen(false)} aria-label="Close AI dialog">
                 <X size={16} />
               </button>
             </div>
-            {aiTab === "generate" ? (
+            {aiTab === "wireframe" ? (
+              <div className="ai-body">
+                <div className="chat-col">
+                  <div style={{ fontSize: 13, color: "var(--subtext0)" }}>
+                    Sends a snapshot of your{" "}
+                    {wfSnap ? (wfSnap.whole ? `whole scene (${wfSnap.count} els)` : `selection (${wfSnap.count} els)`) : "canvas (selection if any, else whole scene)"}{" "}
+                    to a vision model. Needs a vision-capable model — any cloud default works; local
+                    Ollama needs one like <span className="mono">qwen2.5vl</span>.
+                  </div>
+                  {wfSnap && (
+                    <img
+                      src={wfSnap.dataUrl}
+                      alt="Wireframe snapshot"
+                      style={{ width: "100%", borderRadius: 10, border: "1px solid var(--panel-border)" }}
+                    />
+                  )}
+                  <textarea
+                    className="preview-code"
+                    style={{ minHeight: 70 }}
+                    value={wfInstructions}
+                    onChange={(e) => setWfInstructions(e.target.value)}
+                    placeholder="Extra instructions (optional): e.g. dark sidebar, 3-step checkout…"
+                    spellCheck={false}
+                  />
+                  <div className="row" style={{ marginTop: 8 }}>
+                    <button
+                      className="btn"
+                      onClick={() => {
+                        setWfSnap(null);
+                        setWfHtml("");
+                      }}
+                      disabled={wfBusy}
+                    >
+                      Re-capture
+                    </button>
+                    <button className="btn primary" onClick={() => void runWireframe()} disabled={wfBusy}>
+                      {wfBusy ? "Generating…" : wfHtml ? "Regenerate" : "Generate code"}
+                    </button>
+                  </div>
+                </div>
+                <div className="preview-col">
+                  <div className="preview-card">
+                    {wfView === "preview" ? (
+                      wfHtml ? (
+                        <iframe title="Wireframe preview" className="preview-frame" sandbox="allow-scripts" srcDoc={wfHtml} />
+                      ) : (
+                        <div style={{ fontSize: 13, color: "var(--subtext0)", padding: 12 }}>
+                          Preview appears here.
+                        </div>
+                      )
+                    ) : (
+                      <textarea
+                        className="preview-code"
+                        value={wfHtml}
+                        readOnly
+                        placeholder="Generated HTML appears here."
+                        spellCheck={false}
+                      />
+                    )}
+                  </div>
+                  <div className="preview-foot">
+                    <button className="linklike" onClick={() => setWfView((v) => (v === "preview" ? "code" : "preview"))}>
+                      {wfView === "preview" ? "View code →" : "View preview →"}
+                    </button>
+                    <button className="btn" style={{ height: 30, fontSize: 12 }} onClick={() => void copyWireframe()} disabled={!wfHtml}>
+                      Copy
+                    </button>
+                    <button
+                      className="btn"
+                      style={{ height: 30, fontSize: 12 }}
+                      onClick={() => wfHtml && downloadText("wireframe.html", wfHtml, "text/html")}
+                      disabled={!wfHtml}
+                    >
+                      File
+                    </button>
+                    <button className="btn primary" onClick={() => void insertWireframe()} disabled={!wfHtml}>
+                      <Plus size={14} /> Insert frame →
+                    </button>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: "var(--subtext0)" }}>
+                    Insert places a live preview frame on your canvas — resize it to test
+                    responsiveness. The preview runs sandboxed.
+                  </div>
+                </div>
+              </div>
+            ) : aiTab === "generate" ? (
               <div className="ai-body">
                 <div className="chat-col">
                   <div className="chat-top">
